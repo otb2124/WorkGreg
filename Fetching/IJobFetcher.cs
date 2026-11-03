@@ -1,0 +1,39 @@
+using WorkGreg.Domain;
+
+namespace WorkGreg.Fetching;
+
+/// <summary>A normalized vacancy as returned by any fetcher.</summary>
+public sealed record FetchedJob(
+    string ExternalId,
+    string Title,
+    string? Company,
+    string? Location,
+    string Url,
+    string? Description,
+    DateTime? PostedUtc);
+
+/// <summary>
+/// One implementation per <see cref="FetchType"/>. To add a new strategy:
+/// implement this, register it in Program.cs. Nothing else changes.
+/// </summary>
+public interface IJobFetcher
+{
+    FetchType Type { get; }
+
+    /// <summary>False for planned-but-not-built strategies; the bot refuses to create sources of that type.</summary>
+    bool IsAvailable { get; }
+
+    Task<IReadOnlyList<FetchedJob>> FetchAsync(Source source, CancellationToken ct);
+}
+
+public sealed class FetcherRegistry(IEnumerable<IJobFetcher> fetchers)
+{
+    private readonly Dictionary<FetchType, IJobFetcher> _byType = fetchers.ToDictionary(f => f.Type);
+
+    public IJobFetcher Get(FetchType type) =>
+        _byType.TryGetValue(type, out var f)
+            ? f
+            : throw new NotSupportedException($"No fetcher registered for '{type}'.");
+
+    public IEnumerable<IJobFetcher> All => _byType.Values;
+}

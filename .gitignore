@@ -1,0 +1,146 @@
+# ---------- .NET build output ----------
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Ll]og/
+[Ll]ogs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# ---------- Visual Studio ----------
+.vs/
+*.vspscc
+*.vssscc
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+*.VC.db
+*.VC.opendb
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# ---------- Visual Studio Code ----------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# ---------- Rider ----------
+.idea/
+*.sln.iml
+
+# ---------- .NET / NuGet ----------
+project.lock.json
+project.fragment.lock.json
+artifacts/
+*.nuget.props
+*.nuget.targets
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+*.dll
+*.exe
+*.pdb
+*.cache
+!**/node_modules/**/*.dll   # only if you later add a JS client
+
+# ---------- User secrets / local config overrides ----------
+# The secrets themselves live under %APPDATA%\Microsoft\UserSecrets
+# and are already outside the repo; these are local overrides people
+# might drop in the tree by mistake.
+appsettings.Local.json
+appsettings.*.Local.json
+*.local.json
+secrets.json
+
+# ---------- SQLite (your live DB and EF state) ----------
+WorkGreg.db
+WorkGreg.db-shm
+WorkGreg.db-wal
+WorkGreg.db-journal
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# ---------- EF migrations (KEEP these tracked!) ----------
+# Do NOT ignore Migrations/ — they are source code.
+# Listed here as a reminder:
+# !Migrations/
+
+# ---------- WorkGreg-specific artifacts ----------
+exports/
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ---------- Playwright (added when you implement BrowserFetcher) ----------
+.playwright/
+playwright-report/
+test-results/
+pw-traces/
+# Playwright browser downloads — huge, re-fetched by `playwright install`
+.ms-playwright/
+node_modules/              # Playwright.NET pulls this transitively on some configs
+
+# ---------- OS junk ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ---------- Temporary / editor ----------
+*.swp
+*.swo
+*~
+.~*
+*.orig
+*.rej
+*.pid
+*.seed
+*.pid.lock
+
+# ---------- Test / coverage ----------
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+coverage*.info
+TestResults/
+
+# ---------- JetBrains Rider caches ----------
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/shelf/
+.idea/**/contentModel.xml
+.idea/**/dataSources/
+.idea/**/dataSources.local.xml
+.idea/**/sqlDataSources.xml
+.idea/**/dynamic.xml
+.idea/**/uiDesigner.xml
+.idea/**/gradle.xml
+.idea/**/libraries
+.idea/**/mongoSettings.xml
+*.iws
