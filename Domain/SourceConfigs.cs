@@ -1,6 +1,6 @@
-﻿namespace WorkGreg.Domain;
+namespace WorkGreg.Domain;
 
-/// <summary>ConfigJson for FetchType.Html and FetchType.Browser.</summary>
+/// <summary>Config for FetchType.Html and FetchType.Browser. Lives on SourceProvider.Html in the catalog.</summary>
 public sealed class HtmlSourceConfig
 {
     public string ItemSelector { get; set; } = "";
@@ -18,17 +18,18 @@ public sealed class HtmlSourceConfig
     public string? WaitForSelector { get; set; }
 }
 
-/// <summary>ConfigJson for FetchType.Api.</summary>
+/// <summary>Config for FetchType.Api. Lives on SourceProvider.Api in the catalog.</summary>
 public sealed class ApiSourceConfig
 {
     public string Method { get; set; } = "GET";
+    /// <summary>Optional request body. "{keyword}" is replaced with the JSON-escaped search keyword.</summary>
     public string? Body { get; set; }
     public Dictionary<string, string> Headers { get; set; } = new();
     /// <summary>Dot-separated path to the array of items in the JSON response, e.g. "data.jobs".</summary>
     public string ItemsPath { get; set; } = "";
     /// <summary>
     /// Maps our normalized field names to dot-separated paths in each item:
-    /// title, url, id, company, location, description, posted, salary.
+    /// title, url (both required), id, company, location, description, posted, salary (numeric only), employment.
     /// </summary>
     public Dictionary<string, string> FieldMap { get; set; } = new();
 }

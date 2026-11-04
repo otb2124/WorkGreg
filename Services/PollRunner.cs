@@ -39,8 +39,11 @@ public sealed partial class PollRunner(
                 .Where(s => s.Enabled && (ownerChatId == null || s.OwnerChatId == ownerChatId))
                 .ToListAsync(ct);
 
+            // Raw fetch results by (type, url) for this cycle: searches that share a URL cost one request.
+            var cache = new Dictionary<string, IReadOnlyList<FetchedJob>>();
+
             foreach (var source in sources)
-                await FetchSourceAsync(db, source, ct);
+                await FetchSourceAsync(db, source, cache, ct);
 
             var sent = 0;
             foreach (var owner in sources.Select(s => s.OwnerChatId).Distinct())
@@ -55,22 +58,30 @@ public sealed partial class PollRunner(
         }
     }
 
-    private async Task FetchSourceAsync(AppDb db, Source source, CancellationToken ct)
+    private async Task FetchSourceAsync(AppDb db, Source source, Dictionary<string, IReadOnlyList<FetchedJob>> cache, CancellationToken ct)
     {
         try
         {
-            var items = await fetchers.Get(source.Type).FetchAsync(source, ct);
+            var provider = SourceCatalog.Find(source.Provider);
+            var cacheKey = $"{source.Type}|{source.Url}";
 
+            if (!cache.TryGetValue(cacheKey, out var items))
+            {
+                items = await fetchers.Get(source.Type).FetchAsync(new FetchContext(source, provider, source.Url), ct);
+                cache[cacheKey] = items;
+            }
+
+            // A scraper whose selectors broke returns nothing and still "succeeds". Count that as a failure
+            // so the usual 3-in-a-row alert fires. Feeds are excluded: an empty search feed is normal.
+            if (items.Count == 0 && source.Type != FetchType.Feed && source.LastSuccessUtc is not null &&
+                await db.Jobs.AnyAsync(j => j.SourceId == source.Id, ct))
+                throw new InvalidOperationException(
+                    "The source returned 0 items although it returned vacancies before; the site or its response format probably changed.");
+
+            // The provider's own search is a hint at best; the keyword is always enforced here.
             if (!string.IsNullOrWhiteSpace(source.Keyword))
                 items = items
                     .Where(i => SourceCatalog.MatchesKeyword(source.Keyword, i.Title, i.Description))
-                    .ToList();
-
-            var provider = SourceCatalog.Find(source.Provider);
-            if (provider is { FilterKeywordLocally: true } && !string.IsNullOrWhiteSpace(source.Keyword))
-                items = items
-                    .Where(i => i.Title.Contains(source.Keyword, StringComparison.OrdinalIgnoreCase) ||
-                                (i.Description?.Contains(source.Keyword, StringComparison.OrdinalIgnoreCase) ?? false))
                     .ToList();
 
             var known = (await db.Jobs
@@ -98,6 +109,8 @@ public sealed partial class PollRunner(
                     Url = item.Url,
                     Description = item.Description,
                     PostedUtc = item.PostedUtc,
+                    Salary = item.Salary,
+                    EmploymentType = item.EmploymentType,
                     FirstSeenUtc = now,
                     // First successful fetch = baseline: remember everything, notify about nothing.
                     Processed = false
@@ -151,9 +164,9 @@ public sealed partial class PollRunner(
             // (This is a coarse heuristic. If you want precision, add a DeliveryRuns table keyed by (chatId, date).)
         }
 
-        var mySources = await db.Sources.Where(s => s.OwnerChatId == owner).ToListAsync(ct);
-        var sourceNames = mySources.ToDictionary(s => s.Id, s => s.Name);
-        var sourceKeywords = mySources.ToDictionary(s => s.Id, s => s.Keyword);
+        var sourceNames = await db.Sources
+            .Where(s => s.OwnerChatId == owner)
+            .ToDictionaryAsync(s => s.Id, s => s.Name, ct);
 
         var pending = await db.Jobs
             .Where(j => j.OwnerChatId == owner && !j.Processed)
@@ -165,13 +178,6 @@ public sealed partial class PollRunner(
 
         foreach (var job in pending)
         {
-            if (sourceKeywords.GetValueOrDefault(job.SourceId) is { Length: > 0 } kw &&
-                !SourceCatalog.MatchesKeyword(kw, job.Title, job.Description))
-            {
-                job.Processed = true;   // doesn't belong to this search (old keyword or pre-filter backlog)
-                continue;
-            }
-
             if (!FilterEngine.Matches(job, profile))
             {
                 job.Processed = true;

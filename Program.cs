@@ -28,7 +28,9 @@ builder.Services.AddHttpClient("fetch", c =>
 });
 
 // Fetch strategies: add new IJobFetcher implementations here.
+builder.Services.AddSingleton<HostThrottle>();
 builder.Services.AddSingleton<IJobFetcher, FeedFetcher>();
+builder.Services.AddSingleton<IJobFetcher, ApiFetcher>();
 builder.Services.AddSingleton<IJobFetcher, HtmlFetcher>();
 builder.Services.AddSingleton<IJobFetcher, BrowserFetcher>();
 builder.Services.AddSingleton<FetcherRegistry>();

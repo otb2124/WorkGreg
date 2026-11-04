@@ -133,8 +133,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
             return $"Search limit reached ({MaxSourcesPerUser}).";
 
         var url = provider.BuildUrl(keyword);
-        if (mine.Any(s => s.Url == url ||
-                          (s.Provider == provider.Id && string.Equals(s.Keyword, keyword, StringComparison.OrdinalIgnoreCase))))
+        if (mine.Any(s => s.Provider == provider.Id && string.Equals(s.Keyword, keyword, StringComparison.OrdinalIgnoreCase)))
             return "You already have that search.";
 
         var source = new Source
@@ -171,7 +170,10 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
             return $"The keyword must be 1-{SourceCatalog.MaxKeywordLength} characters.";
 
         var url = provider.BuildUrl(keyword);
-        if (await db.Sources.AnyAsync(s => s.OwnerChatId == chatId && s.Id != id && s.Url == url, ct))
+        var sameProvider = await db.Sources
+            .Where(s => s.OwnerChatId == chatId && s.Id != id && s.Provider == provider.Id)
+            .ToListAsync(ct);
+        if (sameProvider.Any(s => string.Equals(s.Keyword, keyword, StringComparison.OrdinalIgnoreCase)))
             return "You already have that search.";
 
         source.Keyword = keyword;

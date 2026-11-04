@@ -10,7 +10,15 @@ public sealed record FetchedJob(
     string? Location,
     string Url,
     string? Description,
-    DateTime? PostedUtc);
+    DateTime? PostedUtc,
+    int? Salary = null,
+    string? EmploymentType = null);
+
+/// <summary>
+/// Everything a fetcher needs for one search. Provider is null for legacy sources added with a raw URL.
+/// Site-specific settings (selectors, JSON paths) come from Provider, not from the database.
+/// </summary>
+public sealed record FetchContext(Source Source, SourceProvider? Provider, string Url);
 
 /// <summary>
 /// One implementation per <see cref="FetchType"/>. To add a new strategy:
@@ -23,7 +31,7 @@ public interface IJobFetcher
     /// <summary>False for planned-but-not-built strategies; the bot refuses to create sources of that type.</summary>
     bool IsAvailable { get; }
 
-    Task<IReadOnlyList<FetchedJob>> FetchAsync(Source source, CancellationToken ct);
+    Task<IReadOnlyList<FetchedJob>> FetchAsync(FetchContext ctx, CancellationToken ct);
 }
 
 public sealed class FetcherRegistry(IEnumerable<IJobFetcher> fetchers)

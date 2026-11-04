@@ -1,4 +1,4 @@
-﻿namespace WorkGreg.Domain;
+namespace WorkGreg.Domain;
 
 /// <summary>
 /// A website we know how to search. The list is hardcoded on purpose:
@@ -9,13 +9,16 @@
 /// <param name="Type">How it is fetched; the matching IJobFetcher must exist and be available.</param>
 /// <param name="BuildUrl">Turns a (normalized) keyword into the URL the fetcher reads.</param>
 /// <param name="KeywordExamples">Shown as hints when asking for a keyword.</param>
+/// <param name="Html">Selectors for FetchType.Html / Browser providers.</param>
+/// <param name="Api">Endpoint mapping for FetchType.Api providers.</param>
 public sealed record SourceProvider(
     string Id,
     string Name,
     FetchType Type,
     Func<string, string> BuildUrl,
     IReadOnlyList<string> KeywordExamples,
-    bool FilterKeywordLocally = false);
+    HtmlSourceConfig? Html = null,
+    ApiSourceConfig? Api = null);
 
 public static class SourceCatalog
 {
@@ -37,8 +40,32 @@ public static class SourceCatalog
             Name: "We Work Remotely",
             Type: FetchType.Feed,
             BuildUrl: _ => "https://weworkremotely.com/remote-jobs.rss",
-            KeywordExamples: ["developer", "angular"],
-            FilterKeywordLocally: true),
+            KeywordExamples: ["developer", "angular"]),
+
+        // JSON API. Remotive documents ?search=, but it has been reported as ignored, so we don't depend on it:
+        // the keyword is enforced locally (SourceCatalog.MatchesKeyword), every keyword uses the same URL,
+        // and PollRunner fetches that URL once per cycle for all searches.
+        new SourceProvider(
+            Id: "remotive",
+            Name: "Remotive",
+            Type: FetchType.Api,
+            BuildUrl: _ => "https://remotive.com/api/remote-jobs",
+            KeywordExamples: ["full stack", "angular", ".net"],
+            Api: new ApiSourceConfig
+            {
+                ItemsPath = "jobs",
+                FieldMap =
+                {
+                    ["id"] = "id",
+                    ["title"] = "title",
+                    ["url"] = "url",
+                    ["company"] = "company_name",
+                    ["location"] = "candidate_required_location",
+                    ["description"] = "description",
+                    ["posted"] = "publication_date",
+                    ["employment"] = "job_type"
+                }
+            }),
     ];
 
     public static SourceProvider? Find(string? id) =>

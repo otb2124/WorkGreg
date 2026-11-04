@@ -5,7 +5,8 @@ public enum FetchType
 {
     Feed = 0,     // RSS / Atom
     Html = 1,     // plain HTTP + HTML/JSON parsing (planned)
-    Browser = 2   // headless browser (planned)
+    Browser = 2,  // headless browser (planned)
+    Api = 3       // JSON endpoint; config lives in SourceProvider.Api
 }
 
 public class Source

@@ -1,22 +1,21 @@
-using System.Net;
 using System.ServiceModel.Syndication;
-using System.Text.RegularExpressions;
 using System.Xml;
 using WorkGreg.Domain;
 
 namespace WorkGreg.Fetching;
 
 /// <summary>Reads RSS 2.0 / Atom feeds (e.g. DOU vacancy feeds, saved-search feeds).</summary>
-public sealed partial class FeedFetcher(IHttpClientFactory httpFactory) : IJobFetcher
+public sealed class FeedFetcher(IHttpClientFactory httpFactory, HostThrottle throttle) : IJobFetcher
 {
     public FetchType Type => FetchType.Feed;
     public bool IsAvailable => true;
 
-    public async Task<IReadOnlyList<FetchedJob>> FetchAsync(Source source, CancellationToken ct)
+    public async Task<IReadOnlyList<FetchedJob>> FetchAsync(FetchContext ctx, CancellationToken ct)
     {
         var http = httpFactory.CreateClient("fetch");
-        await using var stream = await http.GetStreamAsync(source.Url, ct);
+        var bytes = await throttle.RunAsync(ctx.Url, () => http.GetByteArrayAsync(ctx.Url, ct), ct);
 
+        using var stream = new MemoryStream(bytes);
         using var reader = XmlReader.Create(stream, new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Ignore,
@@ -37,7 +36,7 @@ public sealed partial class FeedFetcher(IHttpClientFactory httpFactory) : IJobFe
                 continue;
 
             var rawDescription = item.Summary?.Text ?? (item.Content as TextSyndicationContent)?.Text;
-            var description = Clean(rawDescription);
+            var description = TextUtil.CleanHtml(rawDescription);
 
             DateTime? posted = item.PublishDate != DateTimeOffset.MinValue
                 ? item.PublishDate.UtcDateTime
@@ -49,15 +48,4 @@ public sealed partial class FeedFetcher(IHttpClientFactory httpFactory) : IJobFe
 
         return result;
     }
-
-    private static string? Clean(string? html)
-    {
-        if (string.IsNullOrWhiteSpace(html)) return null;
-        var text = WebUtility.HtmlDecode(TagRegex().Replace(html, " "));
-        text = WhitespaceRegex().Replace(text, " ").Trim();
-        return text.Length > 2000 ? text[..2000] : text;
-    }
-
-    [GeneratedRegex("<[^>]+>")] private static partial Regex TagRegex();
-    [GeneratedRegex(@"\s+")] private static partial Regex WhitespaceRegex();
 }
