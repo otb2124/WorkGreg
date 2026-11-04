@@ -45,6 +45,9 @@ builder.Services.AddSingleton<PollRunner>();
 builder.Services.AddScoped<CommandHandler>();
 
 builder.Services.AddHostedService<BotService>();
+builder.Services.AddSingleton<PendingInputStore>();
+builder.Services.AddScoped<MenuHandler>();
+
 builder.Services.AddHostedService<PollingWorker>();
 
 // API: enums as strings ("feed" / "Feed") instead of numbers.
