@@ -12,9 +12,10 @@ using Microsoft.Extensions.Options;
 namespace WorkGreg.Services;
 
 /// <summary>
-/// One poll cycle: fetch every enabled source of every enabled profile, store unseen jobs, then filter
-/// (with the filters of the profile each job came from) and deliver per user.
-/// Safe to call concurrently (calls are serialized) and safe to crash mid-way (state is saved per job).
+/// One poll cycle. Sources are fetched ONE AT A TIME and each source's new vacancies are filtered and sent
+/// right after it is fetched. Once an owner has received MaxMessagesPerRun vacancies, none of their remaining
+/// sources are fetched in this cycle. Safe to call concurrently (calls are serialized) and safe to crash mid-way
+/// (state is saved per job).
 /// </summary>
 public sealed partial class PollRunner(
     IServiceScopeFactory scopes,
@@ -25,43 +26,143 @@ public sealed partial class PollRunner(
 {
     private const int FailureAlertThreshold = 3;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _stopLock = new();
+    private CancellationTokenSource? _runCts;
+    private bool _stopRequested;
+
+    /// <summary>True while a poll cycle is executing.</summary>
+    public bool IsRunning => Volatile.Read(ref _runCts) is not null;
+
+    /// <summary>True if the most recent cycle ended because <see cref="RequestStop"/> was called.</summary>
+    public bool LastRunStopped { get; private set; }
+
+    /// <summary>Cancels the cycle in progress. Returns false if none is running.</summary>
+    public bool RequestStop()
+    {
+        lock (_stopLock)
+        {
+            if (_runCts is null) return false;
+            _stopRequested = true;
+            _runCts.Cancel();
+            return true;
+        }
+    }
+
+    /// <summary>Result of one delivery pass.</summary>
+    private readonly record struct Delivery(int Sent, int Waiting, int Filtered, int Duplicates);
 
     /// <param name="ownerChatId">Null = all users (scheduled run); otherwise only that user's profiles.</param>
     /// <returns>Number of vacancies sent.</returns>
     public async Task<int> RunAsync(long? ownerChatId, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
+
+        using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        lock (_stopLock)
+        {
+            _stopRequested = false;
+            LastRunStopped = false;
+            _runCts = runCts;
+        }
+
+        var sentBy = new Dictionary<long, int>();
         try
         {
+            var runToken = runCts.Token;
             using var scope = scopes.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDb>();
 
             var profiles = (await db.SearchProfiles
                     .Where(p => p.Enabled && (ownerChatId == null || p.OwnerChatId == ownerChatId))
-                    .ToListAsync(ct))
+                    .ToListAsync(runToken))
                 .ToDictionary(p => p.Id);
 
             var profileIds = profiles.Keys.ToList();
             var sources = await db.Sources
                 .Where(s => s.Enabled && profileIds.Contains(s.SearchProfileId))
-                .ToListAsync(ct);
+                .ToListAsync(runToken);
+
+            var max = options.Value.MaxMessagesPerRun;
+            var owners = sources.Select(s => s.OwnerChatId).Distinct().ToList();
+            sentBy = owners.ToDictionary(o => o, _ => 0);
+            var waitingBy = owners.ToDictionary(o => o, _ => 0);
+            var skippedBy = owners.ToDictionary(o => o, _ => 0);
+            var filteredBy = owners.ToDictionary(o => o, _ => 0);
 
             // Raw fetch results by (type, url) for this cycle: searches that share a URL cost one request
             // (e.g. two profiles that both use Remotive, whose URL doesn't depend on the keyword).
             var cache = new Dictionary<string, IReadOnlyList<FetchedJob>>();
 
-            foreach (var source in sources)
-                await FetchSourceAsync(db, source, profiles[source.SearchProfileId], cache, ct);
+            // Least recently fetched first: when the limit ends a cycle early, the sources that
+            // didn't get a turn are the first ones to be fetched next time (no source starves).
+            var queue = sources.OrderBy(s => s.LastSuccessUtc ?? DateTime.MinValue).ThenBy(s => s.Id).ToList();
 
-            var sent = 0;
-            foreach (var owner in sources.Select(s => s.OwnerChatId).Distinct())
-                sent += await DeliverAsync(db, owner, ct);
+            var fetched = 0;
+            foreach (var source in queue)
+            {
+                runToken.ThrowIfCancellationRequested();
 
-            log.LogInformation("Poll finished: {Sources} sources, {Sent} vacancies sent", sources.Count, sent);
+                var owner = source.OwnerChatId;
+                if (sentBy[owner] >= max)
+                {
+                    skippedBy[owner]++;
+                    continue;
+                }
+
+                await FetchSourceAsync(db, source, profiles[source.SearchProfileId], cache, runToken);
+                fetched++;
+
+                // Send what THIS source just found, right now (newest first). Older leftovers don't jump the queue.
+                var d = await DeliverAsync(db, owner, max - sentBy[owner], source.Id, runToken);
+                sentBy[owner] += d.Sent;
+                filteredBy[owner] += d.Filtered;
+
+                // Everybody is full: stop fetching.
+                if (owners.All(o => sentBy[o] >= max)) break;
+            }
+
+            // Leftovers from earlier runs go out only if there is room, newest first. With no room this
+            // just counts what is waiting.
+            foreach (var owner in owners)
+            {
+                var d = await DeliverAsync(db, owner, max - sentBy[owner], null, runToken);
+                sentBy[owner] += d.Sent;
+                waitingBy[owner] = d.Waiting;
+                filteredBy[owner] += d.Filtered;
+            }
+
+            foreach (var owner in owners)
+            {
+                var skipped = skippedBy[owner];
+                if (sentBy[owner] >= max && (waitingBy[owner] > 0 || skipped > 0))
+                    await SafeSendAsync(owner,
+                        $"… limit of {max} reached for this run" +
+                        (waitingBy[owner] > 0 ? $", {waitingBy[owner]} more matching vacancies are waiting" : "") +
+                        (skipped > 0 ? $", {skipped} sources were not checked yet" : "") +
+                        ". They will arrive on the next run.", runToken);
+                else if (ownerChatId is not null && sentBy[owner] == 0 && filteredBy[owner] > 0)
+                    // Manual /check found keyword matches but the profile's filters removed all of them.
+                    await SafeSendAsync(owner,
+                        $"ℹ️ {filteredBy[owner]} vacancies matched your keyword but were dropped by your profile filters " +
+                        "(Include, Exclude, Companies, Locations, Min salary, Remote only). Open 🎯 Filters to check them.", runToken);
+            }
+
+            var sent = sentBy.Values.Sum();
+            log.LogInformation("Poll finished: {Fetched}/{Sources} sources checked, {Sent} vacancies sent (limit {Max} per user)",
+                fetched, sources.Count, sent, max);
+            return sent;
+        }
+        catch (OperationCanceledException) when (_stopRequested && !ct.IsCancellationRequested)
+        {
+            // /stop (or the Stop button): not an error. Everything delivered so far is already saved.
+            LastRunStopped = true;
+            var sent = sentBy.Values.Sum();
+            log.LogInformation("Poll stopped by user: {Sent} vacancies sent before the stop", sent);
             return sent;
         }
         finally
         {
+            lock (_stopLock) { _runCts = null; }
             _gate.Release();
         }
     }
@@ -72,6 +173,18 @@ public sealed partial class PollRunner(
         try
         {
             var provider = SourceCatalog.Find(source.Provider);
+
+            // A catalog source that was removed from SourceCatalog (dead feed, wrong token...). Don't hit its stale URL.
+            if (source.Provider is not null && provider is null)
+            {
+                if (source.LastError is null)
+                {
+                    source.LastError = "This source was removed from the catalog.";
+                    await db.SaveChangesAsync(ct);
+                }
+                log.LogWarning("Source {Id} '{Name}' uses provider '{Provider}' which is no longer in the catalog; skipped", source.Id, source.Name, source.Provider);
+                return;
+            }
 
             // Derived from the profile's current keyword, so a stale stored Url can never be fetched.
             var url = provider is not null ? provider.BuildUrl(profile.Keyword) : source.Url;
@@ -124,7 +237,6 @@ public sealed partial class PollRunner(
                     Salary = item.Salary,
                     EmploymentType = item.EmploymentType,
                     FirstSeenUtc = now,
-                    // First successful fetch = baseline: remember everything, notify about nothing.
                     Processed = false
                 });
                 added++;
@@ -136,11 +248,11 @@ public sealed partial class PollRunner(
             source.LastSuccessUtc = now;
             await db.SaveChangesAsync(ct);
 
-            log.LogInformation("Source {Id} '{Name}' (profile '{Profile}'): {Total} items, {Added} new", source.Id, source.Name, profile.Name, items.Count, added);
+            log.LogInformation("Source {Id} '{Name}' (profile '{Profile}'): {Total} items match the keyword, {Added} new", source.Id, source.Name, profile.Name, items.Count, added);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            log.LogWarning(ex, "Source {Id} '{Name}' (profile '{Profile}') failed", source.Id, source.Name, profile.Name);
+            log.LogWarning("Source {Id} '{Name}' (profile '{Profile}') failed: {Error}", source.Id, source.Name, profile.Name, ex.Message);
 
             source.ConsecutiveFailures++;
             source.LastError = ex.Message.Length > 300 ? ex.Message[..300] : ex.Message;
@@ -156,25 +268,21 @@ public sealed partial class PollRunner(
         }
     }
 
-    
-
-    private async Task<int> DeliverAsync(AppDb db, long owner, CancellationToken ct)
+    /// <summary>
+    /// Filters the owner's pending vacancies (only those of <paramref name="onlySourceId"/>, or all of them when null)
+    /// and sends at most <paramref name="budget"/> of them, newest first. With budget 0 nothing is sent: matching
+    /// vacancies are just counted as waiting.
+    /// </summary>
+    private async Task<Delivery> DeliverAsync(AppDb db, long owner, int budget, int? onlySourceId, CancellationToken ct)
     {
+        if (budget < 0) budget = 0;
+
         var settings = await db.Profiles.FindAsync(new object[] { owner }, ct) ?? new UserProfile { ChatId = owner };
-        if (settings.Paused) return 0;
+        if (settings.Paused) return new Delivery(0, 0, 0, 0);
 
-        // Digest mode: only run once per day, at the configured hour (UTC).
-        if (settings.Delivery == DeliveryMode.Digest)
-        {
-            var now = DateTime.UtcNow;
-            if (now.Hour != settings.DigestHourUtc) return 0;
-
-            // If we already ran during this digest hour today, skip.
-            var lastDigestUtc = await db.Jobs
-                .Where(j => j.OwnerChatId == owner && j.Delivered)
-                .MaxAsync(j => (DateTime?)j.FirstSeenUtc, ct);
-            // (This is a coarse heuristic. If you want precision, add a DeliveryRuns table keyed by (chatId, date).)
-        }
+        // Digest mode: only deliver during the configured hour (UTC).
+        if (settings.Delivery == DeliveryMode.Digest && DateTime.UtcNow.Hour != settings.DigestHourUtc)
+            return new Delivery(0, 0, 0, 0);
 
         var sources = await db.Sources
             .Where(s => s.OwnerChatId == owner)
@@ -186,14 +294,16 @@ public sealed partial class PollRunner(
             .ToDictionaryAsync(p => p.Id, ct);
 
         var pending = (await db.Jobs
-                .Where(j => j.OwnerChatId == owner && !j.Processed)
-                .OrderBy(j => j.PostedUtc ?? j.FirstSeenUtc)
+                .Where(j => j.OwnerChatId == owner && !j.Processed && (onlySourceId == null || j.SourceId == onlySourceId))
+                .OrderByDescending(j => j.PostedUtc ?? j.FirstSeenUtc)
                 .ToListAsync(ct))
             .Where(j => sources.TryGetValue(j.SourceId, out var s) && profiles.ContainsKey(s.SearchProfileId))
             .ToList();
 
-        var max = options.Value.MaxMessagesPerRun;
         var sent = 0;
+        var waiting = 0;
+        var filteredOut = 0;
+        var duplicates = 0;
 
         foreach (var job in pending)
         {
@@ -203,6 +313,7 @@ public sealed partial class PollRunner(
             if (!FilterEngine.Matches(job, profile))
             {
                 job.Processed = true;
+                filteredOut++;
                 continue;
             }
 
@@ -211,10 +322,16 @@ public sealed partial class PollRunner(
             if (duplicate)
             {
                 job.Processed = true;
+                duplicates++;
                 continue;
             }
 
-            if (sent >= max) break; // rest stays pending for the next run (Telegram rate limits)
+            // Limit reached: keep it pending for the next run, but keep going so the remaining ones are filtered and counted.
+            if (sent >= budget)
+            {
+                waiting++;
+                continue;
+            }
 
             await notifier.SendAsync(owner, FormatMessage(job, source.Name, profile.Name), ct);
             job.Processed = true;
@@ -227,11 +344,12 @@ public sealed partial class PollRunner(
 
         await db.SaveChangesAsync(ct);
 
-        var remaining = pending.Count(j => !j.Processed);
-        if (remaining > 0)
-            await SafeSendAsync(owner, $"… and {remaining} more waiting, they will arrive on the next run.", ct);
+        if (pending.Count > 0)
+            log.LogInformation(
+                "Delivery for {Owner}: {Pending} pending, {Sent} sent, {Filtered} dropped by the profile's filters (Include/Exclude/Companies/Locations/Salary/Remote), {Duplicates} duplicates, {Waiting} waiting for the limit",
+                owner, pending.Count, sent, filteredOut, duplicates, waiting);
 
-        return sent;
+        return new Delivery(sent, waiting, filteredOut, duplicates);
     }
 
     private static string FormatMessage(Job job, string sourceName, string profileName)

@@ -44,7 +44,7 @@ public static class ApiEndpoints
 
     private static IResult GetProviders(FetcherRegistry fetchers) =>
         Results.Ok(SourceCatalog.All.Select(p => new ProviderDto(
-            p.Id, p.Name, p.Type, fetchers.Get(p.Type).IsAvailable, p.KeywordExamples)));
+            p.Id, p.Name, p.Type, fetchers.Get(p.Type).IsAvailable, p.KeywordExamples, SourceCatalog.RegionsOf(p))));
 
     private static async Task<IResult> GetSummary(long chatId, AppDb db, CancellationToken ct)
     {

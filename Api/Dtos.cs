@@ -2,6 +2,7 @@ using WorkGreg.Domain;
 
 namespace WorkGreg.Api;
 
+
 public sealed record SourceDto(
     int Id,
     int ProfileId,
@@ -21,7 +22,7 @@ public sealed record AddSourceRequest(string Provider);
 /// <summary>Null fields are left unchanged.</summary>
 public sealed record UpdateSourceRequest(bool? Enabled);
 
-public sealed record ProviderDto(string Id, string Name, FetchType Type, bool IsAvailable, IReadOnlyList<string> KeywordExamples);
+public sealed record ProviderDto(string Id, string Name, FetchType Type, bool IsAvailable, IReadOnlyList<string> KeywordExamples, IReadOnlyList<string> Regions);
 
 /// <summary>Create (POST) and replace (PUT) body for a profile; the UI sends the whole form. Name defaults to the keyword.</summary>
 public sealed record ProfileRequest(

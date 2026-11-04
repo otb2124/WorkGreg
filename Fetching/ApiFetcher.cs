@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using WorkGreg.Domain;
@@ -46,6 +47,8 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
         using var doc = JsonDocument.Parse(json);
 
         var node = Walk(doc.RootElement, cfg.ItemsPath);
+        if (node is null && cfg.MissingItemsIsEmpty)
+            return [];
         if (node is not { ValueKind: JsonValueKind.Array } items)
             throw new InvalidOperationException(
                 $"'{cfg.ItemsPath}' is not an array in the response; the API format probably changed.");
@@ -59,32 +62,31 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
             var rawUrl = Blank(Read(item, cfg.FieldMap, "url"));
             if (title is null || rawUrl is null) continue;
 
+            if (cfg.UrlTemplate is not null)
+                rawUrl = cfg.UrlTemplate.Replace("{url}", rawUrl);
+
             if (!Uri.TryCreate(baseUri, rawUrl, out var absolute)) continue;
             var url = absolute.ToString();
 
             var externalId = Blank(Read(item, cfg.FieldMap, "id")) ?? url;
 
-            DateTime? posted = DateTime.TryParse(
-                Read(item, cfg.FieldMap, "posted"), CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt)
-                ? dt
-                : null;
-
-            // Only a plain number counts; free text like "$31k - $52k" stays unparsed (null).
-            int? salary = decimal.TryParse(
-                Read(item, cfg.FieldMap, "salary"), NumberStyles.Number, CultureInfo.InvariantCulture, out var amount)
-                ? (int)Math.Round(amount)
-                : null;
+            // Some APIs (Greenhouse) return HTML as escaped text ("&lt;p&gt;"). Decode first so CleanHtml can strip the tags.
+            var rawDescription = Read(item, cfg.FieldMap, "description");
+            if (rawDescription is not null && rawDescription.Contains("&lt;", StringComparison.Ordinal))
+                rawDescription = WebUtility.HtmlDecode(rawDescription);
 
             result.Add(new FetchedJob(
                 externalId,
                 title,
-                Blank(Read(item, cfg.FieldMap, "company")),
+                Blank(Read(item, cfg.FieldMap, "company")) ?? cfg.Company,
                 Blank(Read(item, cfg.FieldMap, "location")),
                 url,
-                TextUtil.CleanHtml(Read(item, cfg.FieldMap, "description")),
-                posted,
-                salary,
+                TextUtil.CleanHtml(rawDescription),
+                ParseDate(Read(item, cfg.FieldMap, "posted")),
+                // Only a plain number counts; free text like "$31k - $52k" stays unparsed (null).
+                decimal.TryParse(Read(item, cfg.FieldMap, "salary"), NumberStyles.Number, CultureInfo.InvariantCulture, out var amount)
+                    ? (int)Math.Round(amount)
+                    : null,
                 Blank(Read(item, cfg.FieldMap, "employment"))));
         }
 
@@ -92,6 +94,29 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
     }
 
     private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    /// <summary>ISO / RFC dates, or a Unix timestamp in seconds or milliseconds (Lever, Arbeitnow, Himalayas).</summary>
+    private static DateTime? ParseDate(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var epoch) && epoch > 100_000_000)
+        {
+            try
+            {
+                var offset = epoch > 100_000_000_000
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(epoch)
+                    : DateTimeOffset.FromUnixTimeSeconds(epoch);
+                return offset.UtcDateTime;
+            }
+            catch (ArgumentOutOfRangeException) { return null; }
+        }
+
+        return DateTime.TryParse(raw, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt)
+            ? dt
+            : null;
+    }
 
     /// <summary>Follows a dot-separated path ("data.jobs", "items.0.id"). Null when any step is missing.</summary>
     private static JsonElement? Walk(JsonElement el, string? path)

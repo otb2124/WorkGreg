@@ -100,6 +100,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
         /check  (run now)
         /resend  (mark all stored vacancies unsent; the next /check sends all matches again)
         /pause, /resume
+        /stop  (cancel a check that is running right now)
         """;
     }
 
@@ -359,8 +360,12 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
 
     private async Task<string> CheckNowAsync(long chatId, CancellationToken ct)
     {
+        if (runner.IsRunning) return "A check is already running. Send /stop to cancel it.";
+
         var sent = await runner.RunAsync(chatId, ct);
-        return $"Check finished. {sent} new vacancies sent.";
+        return runner.LastRunStopped
+            ? $"⏹ Check stopped. {sent} vacancies were sent before it stopped."
+            : $"Check finished. {sent} new vacancies sent.";
     }
 
     private async Task<string> ResendAsync(long chatId, CancellationToken ct)

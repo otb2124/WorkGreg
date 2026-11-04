@@ -5,6 +5,7 @@ using global::Telegram.Bot.Exceptions;
 using global::Telegram.Bot.Polling;
 using global::Telegram.Bot.Types;
 using global::Telegram.Bot.Types.Enums;
+using global::Telegram.Bot.Types.ReplyMarkups;
 
 namespace WorkGreg.Telegram;
 
@@ -12,6 +13,7 @@ public sealed class BotService(
     ITelegramBotClient bot,
     IServiceScopeFactory scopes,
     IOptions<BotOptions> options,
+    PollRunner runner,                       // <-- NEW
     ILogger<BotService> log) : BackgroundService, IUpdateHandler
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -26,7 +28,8 @@ public sealed class BotService(
             {
                 new BotCommand { Command = "menu", Description = "Open the main menu" },
                 new BotCommand { Command = "check", Description = "Check for new vacancies now" },
-                new BotCommand { Command = "help", Description = "List of text commands" }
+                new BotCommand { Command = "help", Description = "List of text commands" },
+                new BotCommand { Command = "stop", Description = "Stop the check that is running" },
             }, cancellationToken: ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -75,6 +78,27 @@ public sealed class BotService(
         if (text.StartsWith('/'))
         {
             menu.CancelPending(chatId);
+
+            if (CommandName(text) == "/stop")
+            {
+                await Reply(chatId, runner.RequestStop()
+                    ? "⏹ Stopping… the check ends as soon as the request in progress is cancelled."
+                    : "No check is running right now.", ct);
+                return;
+            }
+
+            if (CommandName(text) == "/check")
+            {
+                if (runner.IsRunning)
+                {
+                    await Reply(chatId, "A check is already running. Send /stop to cancel it.", ct);
+                    return;
+                }
+
+                await Reply(chatId, "⏳ Checking your sources… vacancies arrive as they are found. Send /stop to cancel.", ct);
+                _ = RunCheckInBackgroundAsync(chatId, ct);   // not awaited on purpose, so /stop can be read meanwhile
+                return;
+            }
 
             if (CommandName(text) is "/start" or "/menu")
             {
@@ -137,6 +161,29 @@ public sealed class BotService(
         if (!IsAllowed(chatId))
         {
             await SafeAnswer(cq.Id, null, ct);
+            return;
+        }
+
+        if (data == "stop")
+        {
+            await SafeAnswer(cq.Id, runner.RequestStop() ? "Stopping…" : "No check is running", ct);
+            return;
+        }
+
+        if (data == "chk")
+        {
+            if (runner.IsRunning)
+            {
+                await SafeAnswer(cq.Id, "A check is already running", ct);
+                return;
+            }
+
+            await SafeAnswer(cq.Id, null, ct);
+            await EditScreen(chatId, messageId, new Screen(
+                "⏳ Checking your sources…\nVacancies arrive as they are found.",
+                new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("⏹ Stop", "stop"))), ct);
+
+            _ = RunCheckFromMenuAsync(chatId, messageId, ct);
             return;
         }
 
@@ -219,6 +266,39 @@ public sealed class BotService(
         {
             log.LogInformation("Menu message is gone ({Reason}), sending a fresh one", ex.Message);
             await SendScreen(chatId, s, ct);
+        }
+    }
+
+
+    private async Task RunCheckInBackgroundAsync(long chatId, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopes.CreateScope();
+            var reply = await scope.ServiceProvider.GetRequiredService<CommandHandler>().HandleAsync(chatId, "/check", ct);
+            await Reply(chatId, reply, ct);
+        }
+        catch (OperationCanceledException) { /* app is shutting down */ }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Background check failed");
+            try { await Reply(chatId, "Something went wrong, check the logs.", ct); } catch { /* nothing more to do */ }
+        }
+    }
+
+    private async Task RunCheckFromMenuAsync(long chatId, int messageId, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopes.CreateScope();
+            var menu = scope.ServiceProvider.GetRequiredService<MenuHandler>();
+            var screen = await menu.HandleCallbackAsync(chatId, messageId, "chk", ct);   // runs the check, returns the main menu
+            await EditScreen(chatId, messageId, screen, ct);
+        }
+        catch (OperationCanceledException) { /* app is shutting down */ }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Background check (menu) failed");
         }
     }
 

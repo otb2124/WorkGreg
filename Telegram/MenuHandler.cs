@@ -164,18 +164,21 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
             case "pst":
                 {
-                    // arg = "<profileId>:<providerId>": add the source if the profile lacks it, remove it otherwise.
-                    var bits = arg.Split(':', 2);
+                    // arg = "<profileId>:<providerId>[:<region>]": add the source if the profile lacks it, remove it otherwise.
+                    var bits = arg.Split(':', 3);
                     var p = await FindProfileAsync(chatId, bits[0], ct);
                     if (p is null || bits.Length < 2) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
 
+                    var providerId = bits[1];
+                    var back = bits.Length > 2 ? $"{bits[0]}:{bits[2]}" : bits[0];   // stay on the same region page
+
                     var has = await db.Sources.AnyAsync(
-                        s => s.SearchProfileId == p.Id && s.Provider == bits[1], ct);
-                    var reply = await commands.HandleAsync(chatId, $"{(has ? "/removesource" : "/addsource")} {p.Id} {bits[1]}", ct);
+                        s => s.SearchProfileId == p.Id && s.Provider == providerId, ct);
+                    var reply = await commands.HandleAsync(chatId, $"{(has ? "/removesource" : "/addsource")} {p.Id} {providerId}", ct);
 
                     return CommandHandler.IsError(reply)
-                        ? await SourcesAsync(chatId, bits[0], Warn(reply), ct)
-                        : (await SourcesAsync(chatId, bits[0], null, ct)) with { Toast = has ? "Source removed" : "Source added" };
+                        ? await SourcesAsync(chatId, back, Warn(reply), ct)
+                        : (await SourcesAsync(chatId, back, null, ct)) with { Toast = has ? "Source removed" : "Source added" };
                 }
 
             case "pdel":
@@ -401,7 +404,11 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> SourcesAsync(long chatId, string idText, string? notice, CancellationToken ct)
     {
-        var p = await FindProfileAsync(chatId, idText, ct);
+        // idText is "<profileId>" (region picker) or "<profileId>:<region>" (sources of that region).
+        var idParts = idText.Split(':', 2);
+        var regionId = idParts.Length > 1 ? idParts[1] : null;
+
+        var p = await FindProfileAsync(chatId, idParts[0], ct);
         if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
 
         var attached = await db.Sources
@@ -409,21 +416,45 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
             .Select(s => s.Provider)
             .ToListAsync(ct);
 
+        bool On(SourceProvider x) => attached.Contains(x.Id, StringComparer.OrdinalIgnoreCase);
+
         // Only sources that can actually be fetched right now.
-        var providers = SourceCatalog.All.Where(x => fetchers.Get(x.Type).IsAvailable).ToList();
+        var available = SourceCatalog.All.Where(x => fetchers.Get(x.Type).IsAvailable).ToList();
+
+        var region = SourceCatalog.Regions.FirstOrDefault(r => r.Id == regionId);
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
-        sb.AppendLine($"<b>📡 Sources · {Html(p.Name)}</b>");
-        sb.AppendLine();
-        sb.Append($"Tap a source to switch it on or off for this profile. Each one searches for <b>{Html(p.Keyword)}</b>.");
 
-        var rows = providers
-            .Select(x => Row(Btn(
-                $"{(attached.Contains(x.Id, StringComparer.OrdinalIgnoreCase) ? "✅" : "☐")} {x.Name}",
-                $"pst:{p.Id}:{x.Id}")))
-            .ToList();
-        rows.Add(Row(Btn("⬅ Back", $"p:{p.Id}")));
+        var rows = new List<InlineKeyboardButton[]>();
+
+        if (region is null)
+        {
+            sb.AppendLine($"<b>📡 Sources · {Html(p.Name)}</b>");
+            sb.AppendLine();
+            sb.Append($"Pick a region, then switch sources on or off. Each source searches for <b>{Html(p.Keyword)}</b>.");
+
+            foreach (var r in SourceCatalog.Regions)
+            {
+                var inRegion = available.Where(x => SourceCatalog.RegionsOf(x).Contains(r.Id)).ToList();
+                if (inRegion.Count == 0) continue;
+                var active = inRegion.Count(On);
+                rows.Add(Row(Btn($"{r.Label} ({inRegion.Count}){(active > 0 ? $" · ✅ {active}" : "")}", $"ps:{p.Id}:{r.Id}")));
+            }
+
+            rows.Add(Row(Btn("⬅ Back", $"p:{p.Id}")));
+        }
+        else
+        {
+            sb.AppendLine($"<b>📡 {Html(region.Label)} · {Html(p.Name)}</b>");
+            sb.AppendLine();
+            sb.Append($"Tap a source to switch it on or off. Each one searches for <b>{Html(p.Keyword)}</b>.");
+
+            foreach (var x in available.Where(x => SourceCatalog.RegionsOf(x).Contains(region.Id)))
+                rows.Add(Row(Btn($"{(On(x) ? "✅" : "☐")} {x.Name}", $"pst:{p.Id}:{x.Id}:{region.Id}")));
+
+            rows.Add(Row(Btn("⬅ Regions", $"ps:{p.Id}")));
+        }
 
         return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
     }
