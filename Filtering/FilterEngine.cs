@@ -7,7 +7,7 @@ public static class FilterEngine
     private static readonly string[] RemoteMarkers =
         ["remote", "віддален", "удален", "дистанц", "work from home"];
 
-    public static bool Matches(Job job, UserProfile profile)
+    public static bool Matches(Job job, SearchProfile profile)
     {
         // Exclude: title only, so "work with senior engineers" in a description doesn't kill a junior role.
         if (Split(profile.Exclude).Any(k => Has(job.Title, k)))

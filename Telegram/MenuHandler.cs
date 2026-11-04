@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
@@ -32,14 +32,20 @@ public sealed class PendingInputStore
 /// Button-driven UI on top of <see cref="CommandHandler"/>. Every change is applied by calling the
 /// existing slash-command logic, so validation lives in exactly one place.
 ///
-/// A "search" is a Source row: a hardcoded source from <see cref="SourceCatalog"/> (e.g. DOU.ua) plus a keyword.
+/// A "profile" is one job hunt (<see cref="SearchProfile"/>): keyword + filters + sources.
 ///
-/// Callback data (max 64 bytes):
-///   home | help | flt | src | dlv | chk | pause:0/1 | rem | rst | rstok
+/// Callback data (max 64 bytes), &lt;id&gt; is a profile id:
+///   home | help | dlv | chk | pause:0/1 | rst | rstok
+///   pls                       profiles list
+///   np                        new profile (asks for a keyword)
+///   p:&lt;id&gt;                  profile page
+///   pf:&lt;id&gt; | ps:&lt;id&gt;       its filters page / sources page
+///   pst:&lt;id&gt;:&lt;provider&gt;     toggle a source on/off for the profile
+///   pen:&lt;id&gt; | prem:&lt;id&gt;    toggle enabled / remote-only
+///   pdel:&lt;id&gt; | pdelok:&lt;id&gt;
 ///   ask:&lt;kind&gt; | clr:&lt;kind&gt; | cancel:&lt;screen&gt;
-///        kinds: inc exc com loc sal add:&lt;sourceId&gt; kw:&lt;searchId&gt;
-///        screens: home flt src dlv s:&lt;searchId&gt;
-///   addsrc | s:&lt;id&gt; | sdel:&lt;id&gt; | sdelok:&lt;id&gt;
+///        kinds: newp | kw:&lt;id&gt; | nm:&lt;id&gt; | inc:&lt;id&gt; exc:&lt;id&gt; com:&lt;id&gt; loc:&lt;id&gt; sal:&lt;id&gt;
+///        screens: home | pls | dlv | p:&lt;id&gt; | pf:&lt;id&gt; | ps:&lt;id&gt;
 ///   dlvi | dlvd | dlvh:&lt;hour&gt;
 /// </summary>
 public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegistry fetchers, PendingInputStore pending)
@@ -54,7 +60,8 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     public async Task<Screen> MainAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var p = await ProfileAsync(chatId, ct);
+        var settings = await SettingsAsync(chatId, ct);
+        var profiles = await db.SearchProfiles.Where(p => p.OwnerChatId == chatId).ToListAsync(ct);
         var sources = await db.Sources.Where(s => s.OwnerChatId == chatId).ToListAsync(ct);
         var failing = sources.Count(s => s.ConsecutiveFailures > 0);
 
@@ -62,15 +69,14 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         AppendNotice(sb, notice);
         sb.AppendLine("<b>🧭 WorkGreg · job watcher</b>");
         sb.AppendLine();
-        sb.AppendLine($"Status: {(p.Paused ? "⏸ paused" : "▶️ active")}");
-        sb.AppendLine($"Searches: {sources.Count}{(failing > 0 ? $"  (❌ {failing} failing)" : "")}");
-        sb.AppendLine($"Filters: {ActiveFilterCount(p)} active");
-        sb.Append($"Delivery: {DeliveryText(p)}");
+        sb.AppendLine($"Status: {(settings.Paused ? "⏸ paused" : "▶️ active")}");
+        sb.AppendLine($"Profiles: {profiles.Count} ({profiles.Count(p => p.Enabled)} active){(failing > 0 ? $"  (❌ {failing} failing sources)" : "")}");
+        sb.Append($"Delivery: {DeliveryText(settings)}");
 
         var kb = Kb(
-            Row(Btn($"📡 Searches ({sources.Count})", "src"), Btn("🎯 Filters", "flt")),
-            Row(Btn("📬 Delivery", "dlv"), Btn("🔎 Check now", "chk")),
-            Row(p.Paused ? Btn("▶️ Resume alerts", "pause:0") : Btn("⏸ Pause alerts", "pause:1")),
+            Row(Btn($"📂 Profiles ({profiles.Count})", "pls"), Btn("📬 Delivery", "dlv")),
+            Row(Btn("🔎 Check now", "chk")),
+            Row(settings.Paused ? Btn("▶️ Resume alerts", "pause:0") : Btn("⏸ Pause alerts", "pause:1")),
             Row(Btn("🔁 Resend all matches", "rst")),
             Row(Btn("❓ Help", "help")));
 
@@ -92,11 +98,16 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 pending.Clear(chatId);
                 return Help();
 
-            case "flt":
-            case "src":
+            case "pls":
             case "dlv":
                 pending.Clear(chatId);
                 return await RenderAsync(chatId, parts[0], ct);
+
+            case "p":
+            case "pf":
+            case "ps":
+                pending.Clear(chatId);
+                return await RenderAsync(chatId, data, ct);
 
             case "chk":
                 {
@@ -117,7 +128,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                     return new Screen(
                         "<b>🔁 Resend all matches?</b>\n" +
                         $"{total} stored vacancies will be marked as not yet sent. " +
-                        "The next check sends every one that matches your filters again " +
+                        "The next check sends every one that matches your profiles again " +
                         "(up to 20 per run, the rest follow on later runs).",
                         kb);
                 }
@@ -128,13 +139,65 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                     return await MainAsync(chatId, Ok(reply), ct);
                 }
 
-            case "rem":
+            // ---- profiles
+
+            case "np":
+                pending.Set(chatId, new PendingInput("newp", messageId));
+                return await PromptAsync(chatId, "newp", null, ct);
+
+            case "pen":
                 {
-                    var p = await ProfileAsync(chatId, ct);
-                    var on = !p.RemoteOnly;
-                    await commands.HandleAsync(chatId, on ? "/remote on" : "/remote off", ct);
-                    return (await FiltersAsync(chatId, null, ct)) with { Toast = $"Remote only: {(on ? "on" : "off")}" };
+                    var p = await FindProfileAsync(chatId, arg, ct);
+                    if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+                    await commands.HandleAsync(chatId, $"{(p.Enabled ? "/disable" : "/enable")} {p.Id}", ct);
+                    return (await ProfileAsync(chatId, arg, null, ct)) with { Toast = p.Enabled ? "Profile disabled" : "Profile enabled" };
                 }
+
+            case "prem":
+                {
+                    var p = await FindProfileAsync(chatId, arg, ct);
+                    if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+                    var on = !p.RemoteOnly;
+                    await commands.HandleAsync(chatId, $"/remote {p.Id} {(on ? "on" : "off")}", ct);
+                    return (await FiltersAsync(chatId, arg, null, ct)) with { Toast = $"Remote only: {(on ? "on" : "off")}" };
+                }
+
+            case "pst":
+                {
+                    // arg = "<profileId>:<providerId>": add the source if the profile lacks it, remove it otherwise.
+                    var bits = arg.Split(':', 2);
+                    var p = await FindProfileAsync(chatId, bits[0], ct);
+                    if (p is null || bits.Length < 2) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+
+                    var has = await db.Sources.AnyAsync(
+                        s => s.SearchProfileId == p.Id && s.Provider == bits[1], ct);
+                    var reply = await commands.HandleAsync(chatId, $"{(has ? "/removesource" : "/addsource")} {p.Id} {bits[1]}", ct);
+
+                    return CommandHandler.IsError(reply)
+                        ? await SourcesAsync(chatId, bits[0], Warn(reply), ct)
+                        : (await SourcesAsync(chatId, bits[0], null, ct)) with { Toast = has ? "Source removed" : "Source added" };
+                }
+
+            case "pdel":
+                {
+                    var p = await FindProfileAsync(chatId, arg, ct);
+                    if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+
+                    var kb = Kb(Row(Btn("🗑 Yes, remove", $"pdelok:{p.Id}"), Btn("✖ Cancel", $"p:{p.Id}")));
+                    return new Screen(
+                        $"<b>Remove profile {Html(p.Name)}?</b>\n" +
+                        "Its sources and stored vacancies are forgotten too, so creating it again sends them again. " +
+                        "To just search for something else, use ✏️ Keyword instead.",
+                        kb);
+                }
+
+            case "pdelok":
+                {
+                    var reply = await commands.HandleAsync(chatId, $"/removeprofile {arg}", ct);
+                    return await ProfilesAsync(chatId, CommandHandler.IsError(reply) ? Warn(reply) : Ok(reply), ct);
+                }
+
+            // ---- prompts
 
             case "ask":
                 pending.Set(chatId, new PendingInput(arg, messageId));
@@ -143,63 +206,26 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
             case "clr":
                 {
                     pending.Clear(chatId);
-                    var cmd = arg switch
+                    var bits = arg.Split(':', 2);
+                    var cmd = bits[0] switch
                     {
                         "inc" => "/include",
                         "exc" => "/exclude",
                         "com" => "/companies",
                         "loc" => "/locations",
-                        "sal" => "/salary off",
+                        "sal" => "/salary",
                         _ => null
                     };
-                    if (cmd is not null) await commands.HandleAsync(chatId, cmd, ct);
-                    return (await FiltersAsync(chatId, null, ct)) with { Toast = "Cleared" };
+                    var id = bits.Length > 1 ? bits[1] : "";
+                    if (cmd is not null) await commands.HandleAsync(chatId, bits[0] == "sal" ? $"{cmd} {id} off" : $"{cmd} {id}", ct);
+                    return (await FiltersAsync(chatId, id, null, ct)) with { Toast = "Cleared" };
                 }
 
             case "cancel":
                 pending.Clear(chatId);
                 return await RenderAsync(chatId, arg, ct);
 
-            case "addsrc":
-                {
-                    // Only sources that can actually be fetched right now.
-                    var providers = SourceCatalog.All.Where(p => fetchers.Get(p.Type).IsAvailable).ToList();
-
-                    if (providers.Count == 1)
-                    {
-                        var kind = $"add:{providers[0].Id}";
-                        pending.Set(chatId, new PendingInput(kind, messageId));
-                        return await PromptAsync(chatId, kind, null, ct);
-                    }
-
-                    var rows = providers.Select(p => Row(Btn(p.Name, $"ask:add:{p.Id}"))).ToList();
-                    rows.Add(Row(Btn("⬅ Back", "src")));
-                    return new Screen(
-                        "<b>➕ New search</b>\nWhich source should I search?",
-                        new InlineKeyboardMarkup(rows.ToArray()));
-                }
-
-            case "s":
-                return await SourceDetailAsync(chatId, arg, null, ct);
-
-            case "sdel":
-                {
-                    var source = await FindSourceAsync(chatId, arg, ct);
-                    if (source is null) return await SourcesAsync(chatId, Warn("No such search."), ct);
-
-                    var kb = Kb(Row(Btn("🗑 Yes, remove", $"sdelok:{source.Id}"), Btn("✖ Cancel", $"s:{source.Id}")));
-                    return new Screen(
-                        $"<b>Remove {Html(source.Name)}?</b>\n" +
-                        "Its stored vacancies are forgotten too, so adding it again sends them again. " +
-                        "To just search for something else, use ✏️ Change keyword instead.",
-                        kb);
-                }
-
-            case "sdelok":
-                {
-                    var reply = await commands.HandleAsync(chatId, $"/removesource {arg}", ct);
-                    return await SourcesAsync(chatId, Ok(reply), ct);
-                }
+            // ---- delivery
 
             case "dlvi":
                 {
@@ -227,89 +253,192 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         var pend = pending.Get(chatId);
         if (pend is null) return null;
 
+        var kindParts = pend.Kind.Split(':', 2);
+        var kind = kindParts[0];
+        var pid = kindParts.Length > 1 ? kindParts[1] : "";
+
         var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var isList = pend.Kind is "inc" or "exc" or "com" or "loc";
+        var isList = kind is "inc" or "exc" or "com" or "loc";
         var input = string.Join(isList ? ", " : " ", lines);
         var clear = input is "-" or "clear" or "off";
 
         string command;
-        switch (pend.Kind)
+        switch (kind)
         {
-            case "inc": command = $"/include {(clear ? "" : input)}"; break;
-            case "exc": command = $"/exclude {(clear ? "" : input)}"; break;
-            case "com": command = $"/companies {(clear ? "" : input)}"; break;
-            case "loc": command = $"/locations {(clear ? "" : input)}"; break;
+            case "newp": command = $"/addprofile {input}"; break;
+            case "kw": command = $"/keyword {pid} {input}"; break;
+            case "nm": command = $"/name {pid} {input}"; break;
+            case "inc": command = $"/include {pid} {(clear ? "" : input)}"; break;
+            case "exc": command = $"/exclude {pid} {(clear ? "" : input)}"; break;
+            case "com": command = $"/companies {pid} {(clear ? "" : input)}"; break;
+            case "loc": command = $"/locations {pid} {(clear ? "" : input)}"; break;
 
             case "sal":
-                if (clear) { command = "/salary off"; break; }
+                if (clear) { command = $"/salary {pid} off"; break; }
                 if (!int.TryParse(input, out var salary) || salary <= 0)
                     return new TextResult(pend.MessageId,
                         await PromptAsync(chatId, pend.Kind, Warn("Please send a positive whole number."), ct));
-                command = $"/salary {salary}";
+                command = $"/salary {pid} {salary}";
                 break;
 
             default:
-                if (pend.Kind.StartsWith("add:"))
-                {
-                    command = $"/addsource {pend.Kind[4..]} {input}";
-                    break;
-                }
-                if (pend.Kind.StartsWith("kw:"))
-                {
-                    command = $"/keyword {pend.Kind[3..]} {input}";
-                    break;
-                }
                 pending.Clear(chatId);
                 return new TextResult(pend.MessageId, await MainAsync(chatId, null, ct));
         }
 
         var reply = await commands.HandleAsync(chatId, command, ct);
 
-        if (pend.Kind.StartsWith("add:"))
-        {
-            // CommandHandler answers "Added #…" on success; anything else is a validation error: ask again.
-            if (!reply.StartsWith("Added", StringComparison.Ordinal))
-                return new TextResult(pend.MessageId, await PromptAsync(chatId, pend.Kind, Warn(reply), ct));
-
-            pending.Clear(chatId);
-            return new TextResult(pend.MessageId, await SourcesAsync(chatId, Ok(reply), ct));
-        }
-
-        if (pend.Kind.StartsWith("kw:"))
-        {
-            // CommandHandler answers "Search #…" on success.
-            if (!reply.StartsWith("Search #", StringComparison.Ordinal))
-                return new TextResult(pend.MessageId, await PromptAsync(chatId, pend.Kind, Warn(reply), ct));
-
-            pending.Clear(chatId);
-            return new TextResult(pend.MessageId, await SourceDetailAsync(chatId, pend.Kind[3..], Ok(reply), ct));
-        }
+        // A validation error: ask again.
+        if (CommandHandler.IsError(reply))
+            return new TextResult(pend.MessageId, await PromptAsync(chatId, pend.Kind, Warn(reply), ct));
 
         pending.Clear(chatId);
-        return new TextResult(pend.MessageId, await FiltersAsync(chatId, Ok(reply), ct));
+
+        switch (kind)
+        {
+            case "newp":
+                {
+                    // The profile just created is the newest one of this user.
+                    var created = await db.SearchProfiles
+                        .Where(p => p.OwnerChatId == chatId)
+                        .OrderByDescending(p => p.Id)
+                        .FirstAsync(ct);
+                    return new TextResult(pend.MessageId,
+                        await ProfileAsync(chatId, created.Id.ToString(), Ok(reply), ct));
+                }
+
+            case "kw":
+            case "nm":
+                return new TextResult(pend.MessageId, await ProfileAsync(chatId, pid, Ok(reply), ct));
+
+            default:
+                return new TextResult(pend.MessageId, await FiltersAsync(chatId, pid, Ok(reply), ct));
+        }
     }
 
     // ------------------------------------------------------------------ screens
 
-    private Task<Screen> RenderAsync(long chatId, string screen, CancellationToken ct) => screen switch
+    private Task<Screen> RenderAsync(long chatId, string screen, CancellationToken ct)
     {
-        "flt" => FiltersAsync(chatId, null, ct),
-        "src" => SourcesAsync(chatId, null, ct),
-        "dlv" => DeliveryAsync(chatId, null, ct),
-        _ when screen.StartsWith("s:") => SourceDetailAsync(chatId, screen[2..], null, ct),
-        _ => MainAsync(chatId, null, ct)
-    };
+        var bits = screen.Split(':', 2);
+        var id = bits.Length > 1 ? bits[1] : "";
 
-    private async Task<Screen> FiltersAsync(long chatId, string? notice, CancellationToken ct)
+        return bits[0] switch
+        {
+            "pls" => ProfilesAsync(chatId, null, ct),
+            "dlv" => DeliveryAsync(chatId, null, ct),
+            "p" => ProfileAsync(chatId, id, null, ct),
+            "pf" => FiltersAsync(chatId, id, null, ct),
+            "ps" => SourcesAsync(chatId, id, null, ct),
+            _ => MainAsync(chatId, null, ct)
+        };
+    }
+
+    private async Task<Screen> ProfilesAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var p = await ProfileAsync(chatId, ct);
+        var profiles = await db.SearchProfiles.Where(p => p.OwnerChatId == chatId).OrderBy(p => p.Id).ToListAsync(ct);
+
+        var sb = new StringBuilder();
+        AppendNotice(sb, notice);
+        sb.AppendLine("<b>📂 Profiles</b>");
+        sb.AppendLine();
+        sb.Append(profiles.Count == 0
+            ? "<i>No profiles yet.</i> A profile is one job hunt: a keyword (e.g. <code>full stack dev</code>), its own filters and its own sources."
+            : "Each profile has its own keyword, filters and sources. Tap one to edit it.");
+
+        var rows = profiles
+            .Select(p => Row(Btn($"{(p.Enabled ? "▶️" : "⏸")} {Short(p.Name, 28)}", $"p:{p.Id}")))
+            .ToList();
+
+        if (profiles.Count < ProfileRules.MaxProfilesPerUser)
+            rows.Add(Row(Btn("➕ New profile", "np")));
+        rows.Add(Row(Btn("⬅ Back", "home")));
+
+        return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
+    }
+
+    private async Task<Screen> ProfileAsync(long chatId, string idText, string? notice, CancellationToken ct)
+    {
+        var p = await FindProfileAsync(chatId, idText, ct);
+        if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+
+        var sources = await db.Sources.Where(s => s.SearchProfileId == p.Id).OrderBy(s => s.Id).ToListAsync(ct);
+
+        var sb = new StringBuilder();
+        AppendNotice(sb, notice);
+        sb.AppendLine($"<b>{Html(p.Name)}</b>  #{p.Id}");
+        sb.AppendLine();
+        sb.AppendLine($"Status: {(p.Enabled ? "▶️ active" : "⏸ disabled (not fetched, nothing delivered)")}");
+        sb.AppendLine($"🔎 Keyword: {Html(p.Keyword)}");
+        sb.AppendLine($"🎯 Filters: {ActiveFilterCount(p)} active");
+
+        if (sources.Count == 0)
+        {
+            sb.Append("📡 Sources: <i>none yet, tap Sources to add some.</i>");
+        }
+        else
+        {
+            sb.AppendLine("📡 Sources:");
+            for (var i = 0; i < sources.Count; i++)
+            {
+                var s = sources[i];
+                var status = s.ConsecutiveFailures > 0
+                    ? $"❌ failing ({s.ConsecutiveFailures}x): {Html(Short(s.LastError ?? "", 120))}"
+                    : s.LastSuccessUtc is null ? "⏳ not checked yet" : $"✅ ok · {s.LastSuccessUtc:yyyy-MM-dd HH:mm} UTC";
+                var line = $"  • {Html(s.Name)}: {status}";
+                if (i < sources.Count - 1) sb.AppendLine(line); else sb.Append(line);
+            }
+        }
+
+        var kb = Kb(
+            Row(Btn("✏️ Keyword", $"ask:kw:{p.Id}"), Btn("🏷 Rename", $"ask:nm:{p.Id}")),
+            Row(Btn("📡 Sources", $"ps:{p.Id}"), Btn("🎯 Filters", $"pf:{p.Id}")),
+            Row(Btn(p.Enabled ? "⏸ Disable" : "▶️ Enable", $"pen:{p.Id}")),
+            Row(Btn("🗑 Remove profile", $"pdel:{p.Id}"), Btn("⬅ Back", "pls")));
+
+        return new Screen(sb.ToString(), kb);
+    }
+
+    private async Task<Screen> SourcesAsync(long chatId, string idText, string? notice, CancellationToken ct)
+    {
+        var p = await FindProfileAsync(chatId, idText, ct);
+        if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+
+        var attached = await db.Sources
+            .Where(s => s.SearchProfileId == p.Id)
+            .Select(s => s.Provider)
+            .ToListAsync(ct);
+
+        // Only sources that can actually be fetched right now.
+        var providers = SourceCatalog.All.Where(x => fetchers.Get(x.Type).IsAvailable).ToList();
+
+        var sb = new StringBuilder();
+        AppendNotice(sb, notice);
+        sb.AppendLine($"<b>📡 Sources · {Html(p.Name)}</b>");
+        sb.AppendLine();
+        sb.Append($"Tap a source to switch it on or off for this profile. Each one searches for <b>{Html(p.Keyword)}</b>.");
+
+        var rows = providers
+            .Select(x => Row(Btn(
+                $"{(attached.Contains(x.Id, StringComparer.OrdinalIgnoreCase) ? "✅" : "☐")} {x.Name}",
+                $"pst:{p.Id}:{x.Id}")))
+            .ToList();
+        rows.Add(Row(Btn("⬅ Back", $"p:{p.Id}")));
+
+        return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
+    }
+
+    private async Task<Screen> FiltersAsync(long chatId, string idText, string? notice, CancellationToken ct)
+    {
+        var p = await FindProfileAsync(chatId, idText, ct);
+        if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
 
         string Show(string s, string empty) => s.Length > 0 ? Html(Short(s)) : $"<i>{empty}</i>";
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
-        sb.AppendLine("<b>🎯 Filters</b>");
-        sb.AppendLine("<i>Apply to every search.</i>");
+        sb.AppendLine($"<b>🎯 Filters · {Html(p.Name)}</b>");
+        sb.AppendLine("<i>Apply to every source of this profile.</i>");
         sb.AppendLine();
         sb.AppendLine($"🔤 Include: {Show(p.Include, "anything")}");
         sb.AppendLine($"🚫 Exclude: {Show(p.Exclude, "nothing")}");
@@ -321,87 +450,23 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         sb.Append("<i>Tap a button to change it.</i>");
 
         var kb = Kb(
-            Row(Btn("🔤 Include", "ask:inc"), Btn("🚫 Exclude", "ask:exc")),
-            Row(Btn("🏢 Companies", "ask:com"), Btn("📍 Locations", "ask:loc")),
-            Row(Btn("💰 Min salary", "ask:sal"), Btn(p.RemoteOnly ? "🏠 Remote: ON ✅" : "🏠 Remote: OFF", "rem")),
-            Row(Btn("⬅ Back", "home")));
+            Row(Btn("🔤 Include", $"ask:inc:{p.Id}"), Btn("🚫 Exclude", $"ask:exc:{p.Id}")),
+            Row(Btn("🏢 Companies", $"ask:com:{p.Id}"), Btn("📍 Locations", $"ask:loc:{p.Id}")),
+            Row(Btn("💰 Min salary", $"ask:sal:{p.Id}"), Btn(p.RemoteOnly ? "🏠 Remote: ON ✅" : "🏠 Remote: OFF", $"prem:{p.Id}")),
+            Row(Btn("⬅ Back", $"p:{p.Id}")));
 
         return new Screen(sb.ToString(), kb);
     }
 
-    private async Task<Screen> SourcesAsync(long chatId, string? notice, CancellationToken ct)
-    {
-        var sources = await db.Sources.Where(s => s.OwnerChatId == chatId).OrderBy(s => s.Id).ToListAsync(ct);
-
-        var sb = new StringBuilder();
-        AppendNotice(sb, notice);
-        sb.AppendLine("<b>📡 Searches</b>");
-        sb.AppendLine();
-        sb.Append(sources.Count == 0
-            ? "<i>No searches yet.</i> A search is a source (like DOU.ua) plus a keyword."
-            : "Tap a search to see its status, change its keyword or remove it.");
-
-        var rows = sources.Select(s =>
-        {
-            var icon = s.ConsecutiveFailures > 0 ? "❌" : s.LastSuccessUtc is null ? "⏳" : "✅";
-            return Row(Btn($"{icon} {Short(s.Name, 28)}", $"s:{s.Id}"));
-        }).ToList();
-
-        rows.Add(Row(Btn("➕ New search", "addsrc")));
-        rows.Add(Row(Btn("⬅ Back", "home")));
-
-        return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
-    }
-
-    private async Task<Screen> SourceDetailAsync(long chatId, string idText, string? notice, CancellationToken ct)
-    {
-        var s = await FindSourceAsync(chatId, idText, ct);
-        if (s is null) return await SourcesAsync(chatId, Warn("No such search."), ct);
-
-        var provider = SourceCatalog.Find(s.Provider);
-
-        var status = s.ConsecutiveFailures > 0
-            ? $"❌ failing ({s.ConsecutiveFailures}x): {Html(s.LastError)}"
-            : s.LastSuccessUtc is null
-                ? "⏳ not checked yet"
-                : $"✅ ok · last success {s.LastSuccessUtc:yyyy-MM-dd HH:mm} UTC";
-
-        var sb = new StringBuilder();
-        AppendNotice(sb, notice);
-
-        if (provider is not null)
-        {
-            sb.AppendLine($"<b>{Html(provider.Name)}</b> · {Html(s.Keyword)}  #{s.Id}");
-            sb.AppendLine();
-            sb.AppendLine($"Source: {Html(provider.Name)}");
-            sb.AppendLine($"Keyword: {Html(s.Keyword)}");
-        }
-        else
-        {
-            // Legacy row added with a raw URL before the source catalog existed.
-            sb.AppendLine($"<b>{Html(s.Name)}</b>  #{s.Id}");
-            sb.AppendLine();
-            sb.AppendLine("Source: <i>custom feed</i>");
-        }
-
-        sb.AppendLine($"URL: {Html(s.Url)}");
-        sb.Append($"Status: {status}");
-
-        var rows = new List<InlineKeyboardButton[]>();
-        if (provider is not null) rows.Add(Row(Btn("✏️ Change keyword", $"ask:kw:{s.Id}")));
-        rows.Add(Row(Btn("🗑 Remove", $"sdel:{s.Id}"), Btn("⬅ Back", "src")));
-
-        return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
-    }
-
     private async Task<Screen> DeliveryAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var p = await ProfileAsync(chatId, ct);
+        var p = await SettingsAsync(chatId, ct);
         var digest = p.Delivery == DeliveryMode.Digest;
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
         sb.AppendLine("<b>📬 Delivery</b>");
+        sb.AppendLine("<i>Applies to all profiles.</i>");
         sb.AppendLine();
         sb.AppendLine($"Now: {DeliveryText(p)}");
         sb.AppendLine();
@@ -421,7 +486,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> HourPickerAsync(long chatId, CancellationToken ct)
     {
-        var p = await ProfileAsync(chatId, ct);
+        var p = await SettingsAsync(chatId, ct);
         var rows = new List<InlineKeyboardButton[]>();
 
         for (var start = 0; start < 24; start += 6)
@@ -444,16 +509,20 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         const string text = """
             <b>❓ Help</b>
 
-            I check your searches every hour and message you about vacancies that match your filters.
+            I check your profiles every hour and message you about vacancies that match them.
 
-            1. 📡 <b>Searches</b>: pick a source (like DOU.ua) and a keyword to search for.
-            2. 🎯 <b>Filters</b>: keywords, companies, locations, salary, remote. They apply to every search.
-            3. 📬 <b>Delivery</b>: instant, or one daily digest.
-            4. 🔁 <b>Resend</b>: mark everything as unsent, so the next check sends all matches again.
+            A 📂 <b>profile</b> is one job hunt, for example "full stack dev" or "IT support". Each profile has:
+            • 🔎 a <b>keyword</b> to search for
+            • 📡 its own <b>sources</b> (job boards)
+            • 🎯 its own <b>filters</b>: include/exclude words, companies, locations, min salary, remote
 
-            A new search's current vacancies are sent too (the ones matching your filters), up to 20 per hourly run.
+            📬 <b>Delivery</b> (instant or one daily digest) and ⏸ pause apply to all profiles.
+            🔁 <b>Resend</b> marks everything as unsent, so the next check sends all matches again.
 
-            Slash commands still work too: /menu /check /sources /filters /pause /resume /resend
+            A new source's current vacancies are sent too (the ones matching the profile's filters), up to 20 per hourly run.
+            If the same vacancy turns up in several profiles or boards, you get it once.
+
+            Slash commands still work too: /menu /profiles /check /pause /resume /resend /help
             """;
         return new Screen(text, Kb(Row(Btn("⬅ Back", "home"))));
     }
@@ -462,69 +531,67 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private sealed record Field(string Title, string? Current, string Help, string Back, bool CanClear);
 
-    private static Field Describe(UserProfile p, string kind) => kind switch
+    private async Task<Field> DescribeAsync(long chatId, string kind, CancellationToken ct)
     {
-        "inc" => new("🔤 Include keywords", p.Include,
-            "Send keywords separated by commas, e.g. <code>.NET, C#, Angular</code>.\n" +
-            "A vacancy matches if <b>any</b> keyword appears in its title, company, location or description.\n" +
-            "Tip: DOU titles are often hyphenated, so add <code>full-stack</code> next to <code>full stack</code>.",
-            "flt", true),
+        var bits = kind.Split(':', 2);
+        var k = bits[0];
 
-        "exc" => new("🚫 Exclude keywords", p.Exclude,
-            "Vacancies whose <b>title</b> contains any of these are skipped, e.g. <code>senior, lead, principal</code>.",
-            "flt", true),
+        if (k == "newp")
+            return new("➕ New profile", null,
+                "Send the keyword to search for, e.g. <code>full stack dev</code> or <code>it support</code>.\n" +
+                "It also becomes the profile's name (you can rename it later). Afterwards you pick its sources and filters.",
+                "pls", false);
 
-        "com" => new("🏢 Companies", p.Companies,
-            "Only vacancies from these companies, separated by commas.\n" +
-            "⚠️ RSS feeds usually don't expose a company, so this can hide everything coming from feed sources.",
-            "flt", true),
+        var p = bits.Length > 1 ? await FindProfileAsync(chatId, bits[1], ct) : null;
+        if (p is null)
+            return new("Profile not found", null, "That profile doesn't exist (anymore).", "pls", false);
 
-        "loc" => new("📍 Locations", p.Locations,
-            "Only vacancies in these locations, separated by commas.\n" +
-            "⚠️ RSS feeds usually don't expose a location, so this can hide everything coming from feed sources.",
-            "flt", true),
+        var filtersBack = $"pf:{p.Id}";
+        var profileBack = $"p:{p.Id}";
 
-        "sal" => new("💰 Minimum salary", p.MinSalary?.ToString() ?? "",
-            "Send a number, e.g. <code>3000</code>.\n" +
-            "⚠️ Vacancies with no reported salary are dropped, and feed sources don't report one yet.",
-            "flt", true),
+        return k switch
+        {
+            "kw" => new("✏️ Keyword", p.Keyword,
+                "Send the new keyword. Every source of this profile will search for it. " +
+                "Vacancies already found are kept; only what is searched changes.",
+                profileBack, false),
 
-        _ when kind.StartsWith("add:") => DescribeAdd(kind[4..]),
+            "nm" => new("🏷 Rename profile", p.Name,
+                $"Send a new name (up to {ProfileRules.MaxNameLength} characters).",
+                profileBack, false),
 
-        _ => throw new ArgumentException($"Unknown prompt kind '{kind}'.")
-    };
+            "inc" => new("🔤 Include keywords", p.Include,
+                "Send keywords separated by commas, e.g. <code>.NET, C#, Angular</code>.\n" +
+                "A vacancy matches if <b>any</b> keyword appears in its title, company, location or description.\n" +
+                "Tip: titles are often hyphenated, so add <code>full-stack</code> next to <code>full stack</code>.",
+                filtersBack, true),
 
-    private static Field DescribeAdd(string providerId)
-    {
-        var provider = SourceCatalog.Find(providerId);
-        if (provider is null)
-            return new("➕ New search", null, "That source doesn't exist.", "src", false);
+            "exc" => new("🚫 Exclude keywords", p.Exclude,
+                "Vacancies whose <b>title</b> contains any of these are skipped, e.g. <code>senior, lead, principal</code>.",
+                filtersBack, true),
 
-        var examples = string.Join(" · ", provider.KeywordExamples.Select(e => $"<code>{Html(e)}</code>"));
-        return new($"➕ New search on {Html(provider.Name)}", null,
-            "Send one keyword or phrase to search for.\n" +
-            $"Examples: {examples}\n" +
-            "Your include/exclude filters still apply on top.",
-            "src", false);
-    }
+            "com" => new("🏢 Companies", p.Companies,
+                "Only vacancies from these companies, separated by commas.\n" +
+                "⚠️ RSS feeds usually don't expose a company, so this can hide everything coming from feed sources.",
+                filtersBack, true),
 
-    private async Task<Field> DescribeKeywordAsync(long chatId, string idText, CancellationToken ct)
-    {
-        var s = await FindSourceAsync(chatId, idText, ct);
-        var provider = SourceCatalog.Find(s?.Provider);
-        if (s is null || provider is null)
-            return new("✏️ Change keyword", null, "That search can't be edited.", "src", false);
+            "loc" => new("📍 Locations", p.Locations,
+                "Only vacancies in these locations, separated by commas, e.g. <code>Zagreb, Europe</code>.\n" +
+                "⚠️ RSS feeds usually don't expose a location, so this can hide everything coming from feed sources.",
+                filtersBack, true),
 
-        return new("✏️ Change keyword", s.Keyword ?? "",
-            $"Send the new keyword for {Html(provider.Name)}. Vacancies already found are kept; only what is searched changes.",
-            $"s:{s.Id}", false);
+            "sal" => new("💰 Minimum salary", p.MinSalary?.ToString() ?? "",
+                "Send a number, e.g. <code>1000</code>.\n" +
+                "⚠️ Vacancies with no reported salary are dropped, and feed sources don't report one yet.",
+                filtersBack, true),
+
+            _ => throw new ArgumentException($"Unknown prompt kind '{kind}'.")
+        };
     }
 
     private async Task<Screen> PromptAsync(long chatId, string kind, string? notice, CancellationToken ct)
     {
-        var f = kind.StartsWith("kw:")
-            ? await DescribeKeywordAsync(chatId, kind[3..], ct)
-            : Describe(await ProfileAsync(chatId, ct), kind);
+        var f = await DescribeAsync(chatId, kind, ct);
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
@@ -545,15 +612,15 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     // ------------------------------------------------------------------ helpers
 
-    private async Task<UserProfile> ProfileAsync(long chatId, CancellationToken ct) =>
+    private async Task<UserProfile> SettingsAsync(long chatId, CancellationToken ct) =>
         await db.Profiles.FindAsync(new object[] { chatId }, ct) ?? new UserProfile { ChatId = chatId };
 
-    private async Task<Source?> FindSourceAsync(long chatId, string idText, CancellationToken ct) =>
+    private async Task<SearchProfile?> FindProfileAsync(long chatId, string idText, CancellationToken ct) =>
         int.TryParse(idText, out var id)
-            ? await db.Sources.FirstOrDefaultAsync(s => s.Id == id && s.OwnerChatId == chatId, ct)
+            ? await db.SearchProfiles.FirstOrDefaultAsync(p => p.Id == id && p.OwnerChatId == chatId, ct)
             : null;
 
-    private static int ActiveFilterCount(UserProfile p) =>
+    private static int ActiveFilterCount(SearchProfile p) =>
         new[]
         {
             p.Include.Length > 0, p.Exclude.Length > 0, p.Companies.Length > 0,
@@ -571,7 +638,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
     }
 
     private static string Ok(string html) => "✅ " + html;
-    private static string Warn(string html) => "⚠️ " + html;
+    private static string Warn(string html) => html.StartsWith(CommandHandler.ErrorPrefix, StringComparison.Ordinal) ? html : CommandHandler.ErrorPrefix + html;
     private static string Html(string? s) => WebUtility.HtmlEncode(s ?? "");
     private static string Short(string s, int max = 300) => s.Length <= max ? s : s[..max] + "…";
 

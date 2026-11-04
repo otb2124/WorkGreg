@@ -1,6 +1,6 @@
 # WorkGreg
 
-Hourly job-vacancy watcher with a Telegram bot. Each user builds a pool of sources (with a fetch type per source) and their own filters; only *new* matching vacancies are sent.
+Hourly job-vacancy watcher with a Telegram bot. Each user creates one or more **profiles** (one per job hunt, e.g. "full stack dev", "it support"). A profile has its own keyword, its own filters and its own sources; only *new* matching vacancies are sent.
 
 ## Run
 
@@ -14,14 +14,28 @@ Hourly job-vacancy watcher with a Telegram bot. Each user builds a pool of sourc
 3. `dotnet run`, then message your bot. The log prints your chat id when an unauthorized chat writes to it; put it into `Bot:AllowedChatIds` (e.g. `[123456789]`) and restart.
 4. In Telegram:
    ```
-   /addsource feed https://example.com/vacancies.rss My feed
-   /include .NET, C#, Angular, full stack
-   /exclude senior, lead, principal
-   /remote on
+   /addprofile full stack dev
+   /addsource 1 remotive
+   /addsource 1 wwr
+   /include 1 .NET, C#, Angular, full stack
+   /exclude 1 senior, lead, principal
+   /salary 1 1000
+   /locations 1 Zagreb, Europe
+   /addprofile it support
+   /addsource 2 remotive
+   /salary 2 800
    /check
    ```
 
 DOU has RSS for vacancy searches (use the RSS link on the filtered vacancies page and verify it still exists). Other boards: look for RSS/Atom links or saved-search feeds first.
+
+## Profiles
+
+- `SearchProfile` = keyword + filters (include, exclude, companies, locations, min salary, remote) + sources. `Source.SearchProfileId` points to it; the keyword is not stored on the source anymore.
+- Delivery mode (instant/digest) and pause are per user and apply to all profiles (`UserProfile`).
+- A disabled profile is not fetched and delivers nothing; its stored jobs wait until it is enabled.
+- The same vacancy found by two profiles (or two boards) is delivered once (company+title hash, per user).
+- Sources that don't depend on the keyword in their URL (Remotive, WWR) are fetched once per poll even if several profiles use them.
 
 ## How it works
 

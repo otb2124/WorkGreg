@@ -15,10 +15,10 @@ public sealed record FetchedJob(
     string? EmploymentType = null);
 
 /// <summary>
-/// Everything a fetcher needs for one search. Provider is null for legacy sources added with a raw URL.
+/// Everything a fetcher needs for one search. Keyword comes from the source's SearchProfile. Provider is null for legacy sources added with a raw URL.
 /// Site-specific settings (selectors, JSON paths) come from Provider, not from the database.
 /// </summary>
-public sealed record FetchContext(Source Source, SourceProvider? Provider, string Url);
+public sealed record FetchContext(Source Source, SourceProvider? Provider, string Url, string Keyword);
 
 /// <summary>
 /// One implementation per <see cref="FetchType"/>. To add a new strategy:

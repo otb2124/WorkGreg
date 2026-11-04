@@ -84,6 +84,55 @@ namespace WorkGreg.Migrations
                     b.ToTable("Jobs");
                 });
 
+            modelBuilder.Entity("WorkGreg.Domain.SearchProfile", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Companies")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Exclude")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Include")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Keyword")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Locations")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("MinSalary")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OwnerChatId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("RemoteOnly")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerChatId");
+
+                    b.ToTable("SearchProfiles");
+                });
+
             modelBuilder.Entity("WorkGreg.Domain.Source", b =>
                 {
                     b.Property<int>("Id")
@@ -102,9 +151,6 @@ namespace WorkGreg.Migrations
                     b.Property<bool>("Enabled")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("Keyword")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("LastError")
                         .HasColumnType("TEXT");
 
@@ -121,6 +167,9 @@ namespace WorkGreg.Migrations
                     b.Property<string>("Provider")
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("SearchProfileId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -131,6 +180,9 @@ namespace WorkGreg.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("SearchProfileId", "Provider")
+                        .IsUnique();
+
                     b.ToTable("Sources");
                 });
 
@@ -139,10 +191,6 @@ namespace WorkGreg.Migrations
                     b.Property<long>("ChatId")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("Companies")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Delivery")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -150,25 +198,7 @@ namespace WorkGreg.Migrations
                     b.Property<int>("DigestHourUtc")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("Exclude")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Include")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Locations")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int?>("MinSalary")
-                        .HasColumnType("INTEGER");
-
                     b.Property<bool>("Paused")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("RemoteOnly")
                         .HasColumnType("INTEGER");
 
                     b.HasKey("ChatId");

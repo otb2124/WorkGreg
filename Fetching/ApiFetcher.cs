@@ -23,7 +23,7 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
             throw new InvalidOperationException("ApiSourceConfig.FieldMap must map at least 'title' and 'url'.");
 
         var http = httpFactory.CreateClient("fetch");
-        var keyword = ctx.Source.Keyword ?? "";
+        var keyword = ctx.Keyword;
 
         var json = await throttle.RunAsync(ctx.Url, async () =>
         {
