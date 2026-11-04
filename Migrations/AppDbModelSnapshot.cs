@@ -102,6 +102,9 @@ namespace WorkGreg.Migrations
                     b.Property<bool>("Enabled")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Keyword")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("LastError")
                         .HasColumnType("TEXT");
 
@@ -114,6 +117,9 @@ namespace WorkGreg.Migrations
 
                     b.Property<long>("OwnerChatId")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Provider")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Type")
                         .IsRequired()

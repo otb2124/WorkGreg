@@ -26,6 +26,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
             "/start" or "/help" => Help(),
             "/sources" => await ListSourcesAsync(chatId, ct),
             "/addsource" => await AddSourceAsync(chatId, args, ct),
+            "/keyword" => await SetSearchKeywordAsync(chatId, args, ct),
             "/removesource" => await RemoveSourceAsync(chatId, args, ct),
             "/filters" => await ShowFiltersAsync(chatId, ct),
             "/include" => await SetKeywordsAsync(chatId, args, include: true, ct),
@@ -34,6 +35,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
             "/pause" => await SetPausedAsync(chatId, true, ct),
             "/resume" => await SetPausedAsync(chatId, false, ct),
             "/check" => await CheckNowAsync(chatId, ct),
+            "/resend" or "/resetprocessed" => await ResendAsync(chatId, ct),
             "/companies" => await SetCompaniesAsync(chatId, args, ct),
             "/locations" => await SetLocationsAsync(chatId, args, ct),
             "/salary" => await SetSalaryAsync(chatId, args, ct),
@@ -44,18 +46,19 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
 
     private string Help()
     {
-        var types = string.Join(", ", fetchers.All.Where(f => f.IsAvailable)
-            .Select(f => f.Type.ToString().ToLowerInvariant()));
+        var sources = SourceIds();
         return $"""
         <b>Job watcher</b>
-        I check your sources every hour and message you about new vacancies that match your filters.
+        I check your searches every hour and message you about vacancies that match your filters.
+        Tip: /menu opens the button menu.
 
-        <b>Sources</b>
-        /addsource &lt;type&gt; &lt;url&gt; [name]  (available types: {types})
+        <b>Searches</b> (a source + a keyword)
+        /addsource &lt;source&gt; &lt;keyword&gt;  (sources: {sources})
+        /keyword &lt;id&gt; &lt;new keyword&gt;
         /sources
         /removesource &lt;id&gt;
 
-        <b>Filters</b>
+        <b>Filters</b> (apply to every search)
         /include kw1, kw2      (match ANY; no args = clear)
         /exclude kw1, kw2      (against title only; no args = clear)
         /companies name1, name2 (against company name; no args = clear)
@@ -71,14 +74,17 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
 
         <b>Control</b>
         /check  (run now)
+        /resend  (mark all stored vacancies unsent; the next /check sends all matches again)
         /pause, /resume
         """;
     }
 
+    private static string SourceIds() => string.Join(", ", SourceCatalog.All.Select(p => p.Id));
+
     private async Task<string> ListSourcesAsync(long chatId, CancellationToken ct)
     {
         var sources = await db.Sources.Where(s => s.OwnerChatId == chatId).OrderBy(s => s.Id).ToListAsync(ct);
-        if (sources.Count == 0) return "No sources yet. Add one with /addsource";
+        if (sources.Count == 0) return "No searches yet. Add one with /addsource";
 
         var sb = new StringBuilder();
         foreach (var s in sources)
@@ -86,8 +92,19 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
             var status = s.ConsecutiveFailures > 0
                 ? $"❌ failing ({s.ConsecutiveFailures}x): {Html(s.LastError)}"
                 : s.LastSuccessUtc is null ? "⏳ not checked yet" : "✅ ok";
-            sb.AppendLine($"#{s.Id} [{s.Type.ToString().ToLowerInvariant()}] <b>{Html(s.Name)}</b>");
-            sb.AppendLine($"{Html(s.Url)}");
+
+            var provider = SourceCatalog.Find(s.Provider);
+            if (provider is not null)
+            {
+                sb.AppendLine($"#{s.Id} <b>{Html(provider.Name)}</b> · {Html(s.Keyword)}");
+            }
+            else
+            {
+                // Legacy row added with a raw URL before the source catalog existed.
+                sb.AppendLine($"#{s.Id} [{s.Type.ToString().ToLowerInvariant()}] <b>{Html(s.Name)}</b>");
+                sb.AppendLine($"{Html(s.Url)}");
+            }
+
             sb.AppendLine(status);
             sb.AppendLine();
         }
@@ -96,36 +113,76 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
 
     private async Task<string> AddSourceAsync(long chatId, string args, CancellationToken ct)
     {
-        var t = args.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var t = args.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (t.Length < 2)
-            return "Usage: /addsource &lt;type&gt; &lt;url&gt; [name]\nExample: /addsource feed https://example.com/jobs.rss My feed";
+            return $"Usage: /addsource &lt;source&gt; &lt;keyword&gt;\nSources: {SourceIds()}\nExample: /addsource dou full stack";
 
-        if (!Enum.TryParse<FetchType>(t[0], ignoreCase: true, out var type))
-            return $"Unknown type '{Html(t[0])}'. Types: {string.Join(", ", Enum.GetNames<FetchType>().Select(n => n.ToLowerInvariant()))}";
+        var provider = SourceCatalog.Find(t[0]);
+        if (provider is null)
+            return $"Unknown source '{Html(t[0])}'. Available: {SourceIds()}";
 
-        if (!fetchers.Get(type).IsAvailable)
-            return $"Type '{type.ToString().ToLowerInvariant()}' is planned but not implemented yet.";
+        var keyword = SourceCatalog.NormalizeKeyword(t[1]);
+        if (keyword is null)
+            return $"The keyword must be 1-{SourceCatalog.MaxKeywordLength} characters.";
 
-        if (!Uri.TryCreate(t[1], UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-            return "That doesn't look like a valid http(s) URL.";
+        if (!fetchers.Get(provider.Type).IsAvailable)
+            return $"{Html(provider.Name)} is planned but not implemented yet.";
 
-        if (await db.Sources.CountAsync(s => s.OwnerChatId == chatId, ct) >= MaxSourcesPerUser)
-            return $"Source limit reached ({MaxSourcesPerUser}).";
+        var mine = await db.Sources.Where(s => s.OwnerChatId == chatId).ToListAsync(ct);
+        if (mine.Count >= MaxSourcesPerUser)
+            return $"Search limit reached ({MaxSourcesPerUser}).";
 
-        if (await db.Sources.AnyAsync(s => s.OwnerChatId == chatId && s.Url == uri.ToString(), ct))
-            return "You already have that source.";
+        var url = provider.BuildUrl(keyword);
+        if (mine.Any(s => s.Url == url ||
+                          (s.Provider == provider.Id && string.Equals(s.Keyword, keyword, StringComparison.OrdinalIgnoreCase))))
+            return "You already have that search.";
 
         var source = new Source
         {
             OwnerChatId = chatId,
-            Type = type,
-            Url = uri.ToString(),
-            Name = t.Length > 2 ? t[2] : uri.Host
+            Type = provider.Type,
+            Provider = provider.Id,
+            Keyword = keyword,
+            Url = url,
+            Name = SourceCatalog.DisplayName(provider, keyword)
         };
         db.Sources.Add(source);
         await db.SaveChangesAsync(ct);
 
-        return $"Added #{source.Id} <b>{Html(source.Name)}</b>.\nThe first check records what's already there; only vacancies posted after that are sent. Run /check to do it now.";
+        // The menu treats a reply starting with "Added" as success.
+        return $"Added #{source.Id} <b>{Html(source.Name)}</b>.\nCurrent vacancies that match your filters will be sent too (up to 20 per run). Run /check to do it now.";
+    }
+
+    private async Task<string> SetSearchKeywordAsync(long chatId, string args, CancellationToken ct)
+    {
+        var t = args.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (t.Length < 2 || !int.TryParse(t[0].TrimStart('#'), out var id))
+            return "Usage: /keyword &lt;id&gt; &lt;new keyword&gt;";
+
+        var source = await db.Sources.FirstOrDefaultAsync(s => s.Id == id && s.OwnerChatId == chatId, ct);
+        if (source is null) return "No such search.";
+
+        var provider = SourceCatalog.Find(source.Provider);
+        if (provider is null)
+            return "This search was added with a raw URL and has no keyword. Remove it and add it again with /addsource.";
+
+        var keyword = SourceCatalog.NormalizeKeyword(t[1]);
+        if (keyword is null)
+            return $"The keyword must be 1-{SourceCatalog.MaxKeywordLength} characters.";
+
+        var url = provider.BuildUrl(keyword);
+        if (await db.Sources.AnyAsync(s => s.OwnerChatId == chatId && s.Id != id && s.Url == url, ct))
+            return "You already have that search.";
+
+        source.Keyword = keyword;
+        source.Url = url;
+        source.Name = SourceCatalog.DisplayName(provider, keyword);
+        source.ConsecutiveFailures = 0;
+        source.LastError = null;
+        await db.SaveChangesAsync(ct);
+
+        // The menu treats a reply starting with "Search #" as success.
+        return $"Search #{source.Id} is now <b>{Html(source.Name)}</b>. Already stored vacancies are kept. Run /check to fetch it.";
     }
 
     private async Task<string> RemoveSourceAsync(long chatId, string args, CancellationToken ct)
@@ -133,7 +190,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
         if (!int.TryParse(args.TrimStart('#'), out var id)) return "Usage: /removesource &lt;id&gt;";
 
         var source = await db.Sources.FirstOrDefaultAsync(s => s.Id == id && s.OwnerChatId == chatId, ct);
-        if (source is null) return "No such source.";
+        if (source is null) return "No such search.";
 
         db.Jobs.RemoveRange(db.Jobs.Where(j => j.SourceId == id));
         db.Sources.Remove(source);
@@ -201,6 +258,21 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
         return $"Check finished. {sent} new vacancies sent.";
     }
 
+    private async Task<string> ResendAsync(long chatId, CancellationToken ct)
+    {
+        // Delivered must be cleared too: DeliverAsync treats "same Hash already Delivered"
+        // as a duplicate, so every job would skip itself.
+        var count = await db.Jobs
+            .Where(j => j.OwnerChatId == chatId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Processed, false)
+                .SetProperty(j => j.Delivered, false), ct);
+
+        return count == 0
+            ? "Nothing to reset yet, no vacancies stored."
+            : $"Reset {count} stored vacancies. Run /check to send everything that matches your filters again.";
+    }
+
     private async Task<UserProfile> GetProfileAsync(long chatId, CancellationToken ct)
     {
         var p = await db.Profiles.FindAsync(new object[] { chatId }, ct);
@@ -211,20 +283,6 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
             await db.SaveChangesAsync(ct);
         }
         return p;
-    }
-
-    private async Task<string> SetListFieldAsync(
-    long chatId, string args, Func<UserProfile, string> getter, string label, CancellationToken ct)
-    {
-        // Getter is only used for the "current value" display; we re-resolve the profile below.
-        var p = await GetProfileAsync(chatId, ct);
-        var value = FilterEngine.Normalize(args);
-        if (label == "Companies") p.Companies = value;
-        else if (label == "Locations") p.Locations = value;
-        else throw new InvalidOperationException(label);
-
-        await db.SaveChangesAsync(ct);
-        return value.Length > 0 ? $"{label}: {Html(value)}" : $"{label} filter cleared.";
     }
 
     private async Task<string> SetSalaryAsync(long chatId, string args, CancellationToken ct)
@@ -240,7 +298,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
         }
 
         if (!int.TryParse(arg, out var salary) || salary <= 0)
-            return "Usage: /salary <positive number>  (or /salary off)";
+            return "Usage: /salary &lt;positive number&gt;  (or /salary off)";
 
         p.MinSalary = salary;
         await db.SaveChangesAsync(ct);
@@ -253,7 +311,7 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
         var p = await GetProfileAsync(chatId, ct);
 
         if (parts.Length == 0)
-            return "Usage: /delivery instant  |  /delivery digest <0-23 UTC>";
+            return "Usage: /delivery instant  |  /delivery digest &lt;0-23 UTC&gt;";
 
         switch (parts[0])
         {
@@ -264,14 +322,14 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
 
             case "digest":
                 if (parts.Length < 2 || !int.TryParse(parts[1], out var hour) || hour is < 0 or > 23)
-                    return "Usage: /delivery digest <0-23 UTC>  (e.g. /delivery digest 9)";
+                    return "Usage: /delivery digest &lt;0-23 UTC&gt;  (e.g. /delivery digest 9)";
                 p.Delivery = DeliveryMode.Digest;
                 p.DigestHourUtc = hour;
                 await db.SaveChangesAsync(ct);
                 return $"Delivery: daily digest at {hour:00}:00 UTC.";
 
             default:
-                return "Usage: /delivery instant  |  /delivery digest <0-23 UTC>";
+                return "Usage: /delivery instant  |  /delivery digest &lt;0-23 UTC&gt;";
         }
     }
 

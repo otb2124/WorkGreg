@@ -16,6 +16,12 @@ public class Source
     public FetchType Type { get; set; }
     public string Url { get; set; } = "";
 
+    /// <summary>Catalog id of the source (see <see cref="SourceCatalog"/>), e.g. "dou". Null for legacy rows added with a raw URL.</summary>
+    public string? Provider { get; set; }
+
+    /// <summary>The search keyword sent to the provider. Url is derived from Provider + Keyword. Null for legacy rows.</summary>
+    public string? Keyword { get; set; }
+
     /// <summary>Fetcher-specific settings (e.g. CSS selectors for Html). Unused by Feed.</summary>
     public string? ConfigJson { get; set; }
 

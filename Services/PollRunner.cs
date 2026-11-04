@@ -61,6 +61,18 @@ public sealed partial class PollRunner(
         {
             var items = await fetchers.Get(source.Type).FetchAsync(source, ct);
 
+            if (!string.IsNullOrWhiteSpace(source.Keyword))
+                items = items
+                    .Where(i => SourceCatalog.MatchesKeyword(source.Keyword, i.Title, i.Description))
+                    .ToList();
+
+            var provider = SourceCatalog.Find(source.Provider);
+            if (provider is { FilterKeywordLocally: true } && !string.IsNullOrWhiteSpace(source.Keyword))
+                items = items
+                    .Where(i => i.Title.Contains(source.Keyword, StringComparison.OrdinalIgnoreCase) ||
+                                (i.Description?.Contains(source.Keyword, StringComparison.OrdinalIgnoreCase) ?? false))
+                    .ToList();
+
             var known = (await db.Jobs
                     .Where(j => j.SourceId == source.Id)
                     .Select(j => j.ExternalId)
@@ -88,7 +100,7 @@ public sealed partial class PollRunner(
                     PostedUtc = item.PostedUtc,
                     FirstSeenUtc = now,
                     // First successful fetch = baseline: remember everything, notify about nothing.
-                    Processed = !source.Baselined
+                    Processed = false
                 });
                 added++;
             }
@@ -119,6 +131,8 @@ public sealed partial class PollRunner(
         }
     }
 
+    
+
     private async Task<int> DeliverAsync(AppDb db, long owner, CancellationToken ct)
     {
         var profile = await db.Profiles.FindAsync(new object[] { owner }, ct) ?? new UserProfile { ChatId = owner };
@@ -137,9 +151,9 @@ public sealed partial class PollRunner(
             // (This is a coarse heuristic. If you want precision, add a DeliveryRuns table keyed by (chatId, date).)
         }
 
-        var sourceNames = await db.Sources
-            .Where(s => s.OwnerChatId == owner)
-            .ToDictionaryAsync(s => s.Id, s => s.Name, ct);
+        var mySources = await db.Sources.Where(s => s.OwnerChatId == owner).ToListAsync(ct);
+        var sourceNames = mySources.ToDictionary(s => s.Id, s => s.Name);
+        var sourceKeywords = mySources.ToDictionary(s => s.Id, s => s.Keyword);
 
         var pending = await db.Jobs
             .Where(j => j.OwnerChatId == owner && !j.Processed)
@@ -151,6 +165,13 @@ public sealed partial class PollRunner(
 
         foreach (var job in pending)
         {
+            if (sourceKeywords.GetValueOrDefault(job.SourceId) is { Length: > 0 } kw &&
+                !SourceCatalog.MatchesKeyword(kw, job.Title, job.Description))
+            {
+                job.Processed = true;   // doesn't belong to this search (old keyword or pre-filter backlog)
+                continue;
+            }
+
             if (!FilterEngine.Matches(job, profile))
             {
                 job.Processed = true;

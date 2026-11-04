@@ -5,6 +5,8 @@ namespace WorkGreg.Api;
 public sealed record SourceDto(
     int Id,
     FetchType Type,
+    string? Provider,
+    string? Keyword,
     string Name,
     string Url,
     bool Enabled,
@@ -13,10 +15,13 @@ public sealed record SourceDto(
     string? LastError,
     DateTime? LastSuccessUtc);
 
-public sealed record AddSourceRequest(FetchType Type, string Url, string? Name);
+/// <summary>A search = a hardcoded source (see GET /api/providers) + a keyword.</summary>
+public sealed record AddSourceRequest(string Provider, string Keyword);
 
 /// <summary>Null fields are left unchanged.</summary>
-public sealed record UpdateSourceRequest(string? Name, bool? Enabled);
+public sealed record UpdateSourceRequest(string? Keyword, bool? Enabled);
+
+public sealed record ProviderDto(string Id, string Name, FetchType Type, bool IsAvailable, IReadOnlyList<string> KeywordExamples);
 
 public sealed record FilterDto(
     string Include,

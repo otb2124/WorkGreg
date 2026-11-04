@@ -17,6 +17,7 @@ public static class ApiEndpoints
         var api = app.MapGroup("/api").AddEndpointFilter<ApiKeyFilter>();
 
         api.MapGet("/fetch-types", GetFetchTypes);
+        api.MapGet("/providers", GetProviders);
 
         var user = api.MapGroup("/{chatId:long}").AddEndpointFilter<ChatAccessFilter>();
 
@@ -36,6 +37,10 @@ public static class ApiEndpoints
 
     private static IResult GetFetchTypes(FetcherRegistry fetchers) =>
         Results.Ok(fetchers.All.Select(f => new FetchTypeDto(f.Type, f.IsAvailable)));
+
+    private static IResult GetProviders(FetcherRegistry fetchers) =>
+        Results.Ok(SourceCatalog.All.Select(p => new ProviderDto(
+            p.Id, p.Name, p.Type, fetchers.Get(p.Type).IsAvailable, p.KeywordExamples)));
 
     private static async Task<IResult> GetSummary(long chatId, AppDb db, CancellationToken ct)
     {
@@ -68,24 +73,35 @@ public static class ApiEndpoints
     private static async Task<IResult> AddSource(
         long chatId, AddSourceRequest req, AppDb db, FetcherRegistry fetchers, CancellationToken ct)
     {
-        if (!fetchers.Get(req.Type).IsAvailable)
-            return Results.BadRequest($"Type '{req.Type}' is planned but not implemented yet.");
+        var provider = SourceCatalog.Find(req.Provider);
+        if (provider is null)
+            return Results.BadRequest(
+                $"Unknown source '{req.Provider}'. Available: {string.Join(", ", SourceCatalog.All.Select(p => p.Id))}.");
 
-        if (!Uri.TryCreate(req.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-            return Results.BadRequest("That doesn't look like a valid http(s) URL.");
+        var keyword = SourceCatalog.NormalizeKeyword(req.Keyword);
+        if (keyword is null)
+            return Results.BadRequest($"The keyword must be 1-{SourceCatalog.MaxKeywordLength} characters.");
 
-        if (await db.Sources.CountAsync(s => s.OwnerChatId == chatId, ct) >= MaxSourcesPerUser)
-            return Results.BadRequest($"Source limit reached ({MaxSourcesPerUser}).");
+        if (!fetchers.Get(provider.Type).IsAvailable)
+            return Results.BadRequest($"{provider.Name} is planned but not implemented yet.");
 
-        if (await db.Sources.AnyAsync(s => s.OwnerChatId == chatId && s.Url == uri.ToString(), ct))
-            return Results.Conflict("You already have that source.");
+        var mine = await db.Sources.Where(s => s.OwnerChatId == chatId).ToListAsync(ct);
+        if (mine.Count >= MaxSourcesPerUser)
+            return Results.BadRequest($"Search limit reached ({MaxSourcesPerUser}).");
+
+        var url = provider.BuildUrl(keyword);
+        if (mine.Any(s => s.Url == url ||
+                          (s.Provider == provider.Id && string.Equals(s.Keyword, keyword, StringComparison.OrdinalIgnoreCase))))
+            return Results.Conflict("You already have that search.");
 
         var source = new Source
         {
             OwnerChatId = chatId,
-            Type = req.Type,
-            Url = uri.ToString(),
-            Name = string.IsNullOrWhiteSpace(req.Name) ? uri.Host : req.Name.Trim()
+            Type = provider.Type,
+            Provider = provider.Id,
+            Keyword = keyword,
+            Url = url,
+            Name = SourceCatalog.DisplayName(provider, keyword)
         };
         db.Sources.Add(source);
         await db.SaveChangesAsync(ct);
@@ -99,7 +115,27 @@ public static class ApiEndpoints
         var source = await db.Sources.FirstOrDefaultAsync(s => s.Id == id && s.OwnerChatId == chatId, ct);
         if (source is null) return Results.NotFound();
 
-        if (!string.IsNullOrWhiteSpace(req.Name)) source.Name = req.Name.Trim();
+        if (req.Keyword is not null)
+        {
+            var provider = SourceCatalog.Find(source.Provider);
+            if (provider is null)
+                return Results.BadRequest("This search was added with a raw URL and has no keyword. Remove it and add it again.");
+
+            var keyword = SourceCatalog.NormalizeKeyword(req.Keyword);
+            if (keyword is null)
+                return Results.BadRequest($"The keyword must be 1-{SourceCatalog.MaxKeywordLength} characters.");
+
+            var url = provider.BuildUrl(keyword);
+            if (await db.Sources.AnyAsync(s => s.OwnerChatId == chatId && s.Id != id && s.Url == url, ct))
+                return Results.Conflict("You already have that search.");
+
+            source.Keyword = keyword;
+            source.Url = url;
+            source.Name = SourceCatalog.DisplayName(provider, keyword);
+            source.ConsecutiveFailures = 0;
+            source.LastError = null;
+        }
+
         if (req.Enabled is { } enabled) source.Enabled = enabled;
 
         await db.SaveChangesAsync(ct);
@@ -196,7 +232,7 @@ public static class ApiEndpoints
     // ---- Mapping ----
 
     private static SourceDto ToDto(Source s) =>
-        new(s.Id, s.Type, s.Name, s.Url, s.Enabled, s.Baselined, s.ConsecutiveFailures, s.LastError, s.LastSuccessUtc);
+        new(s.Id, s.Type, s.Provider, s.Keyword, s.Name, s.Url, s.Enabled, s.Baselined, s.ConsecutiveFailures, s.LastError, s.LastSuccessUtc);
 
     private static FilterDto ToDto(UserProfile p) =>
         new(p.Include, p.Exclude, p.Companies, p.Locations, p.MinSalary,

@@ -32,9 +32,13 @@ public sealed class PendingInputStore
 /// Button-driven UI on top of <see cref="CommandHandler"/>. Every change is applied by calling the
 /// existing slash-command logic, so validation lives in exactly one place.
 ///
+/// A "search" is a Source row: a hardcoded source from <see cref="SourceCatalog"/> (e.g. DOU.ua) plus a keyword.
+///
 /// Callback data (max 64 bytes):
-///   home | help | flt | src | dlv | chk | pause:0/1 | rem
-///   ask:&lt;kind&gt; | clr:&lt;kind&gt; | cancel:&lt;screen&gt;      kinds: inc exc com loc sal add:&lt;type&gt;
+///   home | help | flt | src | dlv | chk | pause:0/1 | rem | rst | rstok
+///   ask:&lt;kind&gt; | clr:&lt;kind&gt; | cancel:&lt;screen&gt;
+///        kinds: inc exc com loc sal add:&lt;sourceId&gt; kw:&lt;searchId&gt;
+///        screens: home flt src dlv s:&lt;searchId&gt;
 ///   addsrc | s:&lt;id&gt; | sdel:&lt;id&gt; | sdelok:&lt;id&gt;
 ///   dlvi | dlvd | dlvh:&lt;hour&gt;
 /// </summary>
@@ -59,14 +63,15 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         sb.AppendLine("<b>🧭 WorkGreg · job watcher</b>");
         sb.AppendLine();
         sb.AppendLine($"Status: {(p.Paused ? "⏸ paused" : "▶️ active")}");
-        sb.AppendLine($"Sources: {sources.Count}{(failing > 0 ? $"  (❌ {failing} failing)" : "")}");
+        sb.AppendLine($"Searches: {sources.Count}{(failing > 0 ? $"  (❌ {failing} failing)" : "")}");
         sb.AppendLine($"Filters: {ActiveFilterCount(p)} active");
         sb.Append($"Delivery: {DeliveryText(p)}");
 
         var kb = Kb(
-            Row(Btn($"📡 Sources ({sources.Count})", "src"), Btn("🎯 Filters", "flt")),
+            Row(Btn($"📡 Searches ({sources.Count})", "src"), Btn("🎯 Filters", "flt")),
             Row(Btn("📬 Delivery", "dlv"), Btn("🔎 Check now", "chk")),
             Row(p.Paused ? Btn("▶️ Resume alerts", "pause:0") : Btn("⏸ Pause alerts", "pause:1")),
+            Row(Btn("🔁 Resend all matches", "rst")),
             Row(Btn("❓ Help", "help")));
 
         return new Screen(sb.ToString(), kb);
@@ -105,6 +110,24 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                     return await MainAsync(chatId, Ok(reply), ct);
                 }
 
+            case "rst":
+                {
+                    var total = await db.Jobs.CountAsync(j => j.OwnerChatId == chatId, ct);
+                    var kb = Kb(Row(Btn("🔁 Yes, reset", "rstok"), Btn("✖ Cancel", "home")));
+                    return new Screen(
+                        "<b>🔁 Resend all matches?</b>\n" +
+                        $"{total} stored vacancies will be marked as not yet sent. " +
+                        "The next check sends every one that matches your filters again " +
+                        "(up to 20 per run, the rest follow on later runs).",
+                        kb);
+                }
+
+            case "rstok":
+                {
+                    var reply = await commands.HandleAsync(chatId, "/resend", ct);
+                    return await MainAsync(chatId, Ok(reply), ct);
+                }
+
             case "rem":
                 {
                     var p = await ProfileAsync(chatId, ct);
@@ -139,32 +162,37 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
             case "addsrc":
                 {
-                    var types = fetchers.All.Where(f => f.IsAvailable)
-                        .Select(f => f.Type.ToString().ToLowerInvariant()).ToList();
+                    // Only sources that can actually be fetched right now.
+                    var providers = SourceCatalog.All.Where(p => fetchers.Get(p.Type).IsAvailable).ToList();
 
-                    if (types.Count == 1)
+                    if (providers.Count == 1)
                     {
-                        var kind = $"add:{types[0]}";
+                        var kind = $"add:{providers[0].Id}";
                         pending.Set(chatId, new PendingInput(kind, messageId));
                         return await PromptAsync(chatId, kind, null, ct);
                     }
 
-                    var rows = types.Select(t => Row(Btn(t, $"ask:add:{t}"))).ToList();
+                    var rows = providers.Select(p => Row(Btn(p.Name, $"ask:add:{p.Id}"))).ToList();
                     rows.Add(Row(Btn("⬅ Back", "src")));
-                    return new Screen("<b>➕ Add source</b>\nWhich type of source?", new InlineKeyboardMarkup(rows.ToArray()));
+                    return new Screen(
+                        "<b>➕ New search</b>\nWhich source should I search?",
+                        new InlineKeyboardMarkup(rows.ToArray()));
                 }
 
             case "s":
-                return await SourceDetailAsync(chatId, arg, ct);
+                return await SourceDetailAsync(chatId, arg, null, ct);
 
             case "sdel":
                 {
                     var source = await FindSourceAsync(chatId, arg, ct);
-                    if (source is null) return await SourcesAsync(chatId, Warn("No such source."), ct);
+                    if (source is null) return await SourcesAsync(chatId, Warn("No such search."), ct);
 
                     var kb = Kb(Row(Btn("🗑 Yes, remove", $"sdelok:{source.Id}"), Btn("✖ Cancel", $"s:{source.Id}")));
                     return new Screen(
-                        $"<b>Remove {Html(source.Name)}?</b>\nIts stored vacancies are forgotten too.", kb);
+                        $"<b>Remove {Html(source.Name)}?</b>\n" +
+                        "Its stored vacancies are forgotten too, so adding it again sends them again. " +
+                        "To just search for something else, use ✏️ Change keyword instead.",
+                        kb);
                 }
 
             case "sdelok":
@@ -226,6 +254,11 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                     command = $"/addsource {pend.Kind[4..]} {input}";
                     break;
                 }
+                if (pend.Kind.StartsWith("kw:"))
+                {
+                    command = $"/keyword {pend.Kind[3..]} {input}";
+                    break;
+                }
                 pending.Clear(chatId);
                 return new TextResult(pend.MessageId, await MainAsync(chatId, null, ct));
         }
@@ -242,6 +275,16 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
             return new TextResult(pend.MessageId, await SourcesAsync(chatId, Ok(reply), ct));
         }
 
+        if (pend.Kind.StartsWith("kw:"))
+        {
+            // CommandHandler answers "Search #…" on success.
+            if (!reply.StartsWith("Search #", StringComparison.Ordinal))
+                return new TextResult(pend.MessageId, await PromptAsync(chatId, pend.Kind, Warn(reply), ct));
+
+            pending.Clear(chatId);
+            return new TextResult(pend.MessageId, await SourceDetailAsync(chatId, pend.Kind[3..], Ok(reply), ct));
+        }
+
         pending.Clear(chatId);
         return new TextResult(pend.MessageId, await FiltersAsync(chatId, Ok(reply), ct));
     }
@@ -253,6 +296,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         "flt" => FiltersAsync(chatId, null, ct),
         "src" => SourcesAsync(chatId, null, ct),
         "dlv" => DeliveryAsync(chatId, null, ct),
+        _ when screen.StartsWith("s:") => SourceDetailAsync(chatId, screen[2..], null, ct),
         _ => MainAsync(chatId, null, ct)
     };
 
@@ -265,6 +309,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
         sb.AppendLine("<b>🎯 Filters</b>");
+        sb.AppendLine("<i>Apply to every search.</i>");
         sb.AppendLine();
         sb.AppendLine($"🔤 Include: {Show(p.Include, "anything")}");
         sb.AppendLine($"🚫 Exclude: {Show(p.Exclude, "nothing")}");
@@ -290,11 +335,11 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
-        sb.AppendLine("<b>📡 Sources</b>");
+        sb.AppendLine("<b>📡 Searches</b>");
         sb.AppendLine();
         sb.Append(sources.Count == 0
-            ? "<i>No sources yet.</i> Add an RSS/Atom feed link to start receiving vacancies."
-            : "Tap a source to see its status or remove it.");
+            ? "<i>No searches yet.</i> A search is a source (like DOU.ua) plus a keyword."
+            : "Tap a search to see its status, change its keyword or remove it.");
 
         var rows = sources.Select(s =>
         {
@@ -302,16 +347,18 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
             return Row(Btn($"{icon} {Short(s.Name, 28)}", $"s:{s.Id}"));
         }).ToList();
 
-        rows.Add(Row(Btn("➕ Add source", "addsrc")));
+        rows.Add(Row(Btn("➕ New search", "addsrc")));
         rows.Add(Row(Btn("⬅ Back", "home")));
 
         return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
     }
 
-    private async Task<Screen> SourceDetailAsync(long chatId, string idText, CancellationToken ct)
+    private async Task<Screen> SourceDetailAsync(long chatId, string idText, string? notice, CancellationToken ct)
     {
         var s = await FindSourceAsync(chatId, idText, ct);
-        if (s is null) return await SourcesAsync(chatId, Warn("No such source."), ct);
+        if (s is null) return await SourcesAsync(chatId, Warn("No such search."), ct);
+
+        var provider = SourceCatalog.Find(s.Provider);
 
         var status = s.ConsecutiveFailures > 0
             ? $"❌ failing ({s.ConsecutiveFailures}x): {Html(s.LastError)}"
@@ -319,16 +366,32 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 ? "⏳ not checked yet"
                 : $"✅ ok · last success {s.LastSuccessUtc:yyyy-MM-dd HH:mm} UTC";
 
-        var text = new StringBuilder()
-            .AppendLine($"<b>{Html(s.Name)}</b>  #{s.Id}")
-            .AppendLine()
-            .AppendLine($"Type: {s.Type.ToString().ToLowerInvariant()}")
-            .AppendLine($"URL: {Html(s.Url)}")
-            .Append($"Status: {status}")
-            .ToString();
+        var sb = new StringBuilder();
+        AppendNotice(sb, notice);
 
-        var kb = Kb(Row(Btn("🗑 Remove", $"sdel:{s.Id}"), Btn("⬅ Back", "src")));
-        return new Screen(text, kb);
+        if (provider is not null)
+        {
+            sb.AppendLine($"<b>{Html(provider.Name)}</b> · {Html(s.Keyword)}  #{s.Id}");
+            sb.AppendLine();
+            sb.AppendLine($"Source: {Html(provider.Name)}");
+            sb.AppendLine($"Keyword: {Html(s.Keyword)}");
+        }
+        else
+        {
+            // Legacy row added with a raw URL before the source catalog existed.
+            sb.AppendLine($"<b>{Html(s.Name)}</b>  #{s.Id}");
+            sb.AppendLine();
+            sb.AppendLine("Source: <i>custom feed</i>");
+        }
+
+        sb.AppendLine($"URL: {Html(s.Url)}");
+        sb.Append($"Status: {status}");
+
+        var rows = new List<InlineKeyboardButton[]>();
+        if (provider is not null) rows.Add(Row(Btn("✏️ Change keyword", $"ask:kw:{s.Id}")));
+        rows.Add(Row(Btn("🗑 Remove", $"sdel:{s.Id}"), Btn("⬅ Back", "src")));
+
+        return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
     }
 
     private async Task<Screen> DeliveryAsync(long chatId, string? notice, CancellationToken ct)
@@ -381,15 +444,16 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         const string text = """
             <b>❓ Help</b>
 
-            I check your sources every hour and message you about <b>new</b> vacancies that match your filters.
+            I check your searches every hour and message you about vacancies that match your filters.
 
-            1. 📡 <b>Sources</b>: add an RSS/Atom feed link.
-            2. 🎯 <b>Filters</b>: keywords, companies, locations, salary, remote.
+            1. 📡 <b>Searches</b>: pick a source (like DOU.ua) and a keyword to search for.
+            2. 🎯 <b>Filters</b>: keywords, companies, locations, salary, remote. They apply to every search.
             3. 📬 <b>Delivery</b>: instant, or one daily digest.
+            4. 🔁 <b>Resend</b>: mark everything as unsent, so the next check sends all matches again.
 
-            The first check of a new source only records what is already there; only vacancies posted after that are sent.
+            A new search's current vacancies are sent too (the ones matching your filters), up to 20 per hourly run.
 
-            Slash commands still work too: /menu /check /sources /filters /pause /resume
+            Slash commands still work too: /menu /check /sources /filters /pause /resume /resend
             """;
         return new Screen(text, Kb(Row(Btn("⬅ Back", "home"))));
     }
@@ -402,7 +466,8 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
     {
         "inc" => new("🔤 Include keywords", p.Include,
             "Send keywords separated by commas, e.g. <code>.NET, C#, Angular</code>.\n" +
-            "A vacancy matches if <b>any</b> keyword appears in its title, company, location or description.",
+            "A vacancy matches if <b>any</b> keyword appears in its title, company, location or description.\n" +
+            "Tip: DOU titles are often hyphenated, so add <code>full-stack</code> next to <code>full stack</code>.",
             "flt", true),
 
         "exc" => new("🚫 Exclude keywords", p.Exclude,
@@ -424,16 +489,42 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
             "⚠️ Vacancies with no reported salary are dropped, and feed sources don't report one yet.",
             "flt", true),
 
-        _ when kind.StartsWith("add:") => new($"➕ Add source ({kind[4..]})", null,
-            "Send the link, optionally followed by a name:\n<code>https://example.com/jobs.rss My feed</code>",
-            "src", false),
+        _ when kind.StartsWith("add:") => DescribeAdd(kind[4..]),
 
         _ => throw new ArgumentException($"Unknown prompt kind '{kind}'.")
     };
 
+    private static Field DescribeAdd(string providerId)
+    {
+        var provider = SourceCatalog.Find(providerId);
+        if (provider is null)
+            return new("➕ New search", null, "That source doesn't exist.", "src", false);
+
+        var examples = string.Join(" · ", provider.KeywordExamples.Select(e => $"<code>{Html(e)}</code>"));
+        return new($"➕ New search on {Html(provider.Name)}", null,
+            "Send one keyword or phrase to search for.\n" +
+            $"Examples: {examples}\n" +
+            "Your include/exclude filters still apply on top.",
+            "src", false);
+    }
+
+    private async Task<Field> DescribeKeywordAsync(long chatId, string idText, CancellationToken ct)
+    {
+        var s = await FindSourceAsync(chatId, idText, ct);
+        var provider = SourceCatalog.Find(s?.Provider);
+        if (s is null || provider is null)
+            return new("✏️ Change keyword", null, "That search can't be edited.", "src", false);
+
+        return new("✏️ Change keyword", s.Keyword ?? "",
+            $"Send the new keyword for {Html(provider.Name)}. Vacancies already found are kept; only what is searched changes.",
+            $"s:{s.Id}", false);
+    }
+
     private async Task<Screen> PromptAsync(long chatId, string kind, string? notice, CancellationToken ct)
     {
-        var f = Describe(await ProfileAsync(chatId, ct), kind);
+        var f = kind.StartsWith("kw:")
+            ? await DescribeKeywordAsync(chatId, kind[3..], ct)
+            : Describe(await ProfileAsync(chatId, ct), kind);
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
