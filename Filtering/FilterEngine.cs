@@ -43,6 +43,46 @@ public static class FilterEngine
         return true;
     }
 
+    /// <summary>True if the job looks remote (same markers the RemoteOnly filter uses).</summary>
+    public static bool IsRemote(Job job) =>
+        RemoteMarkers.Any(m => Has($"{job.Title} {job.Company} {job.Location} {job.Description}", m));
+
+    /// <summary>
+    /// Human-readable list of the profile criteria this job satisfied (call only for jobs that passed
+    /// <see cref="Matches"/>). Plain text; the caller HTML-encodes it.
+    /// </summary>
+    public static List<string> Explain(Job job, SearchProfile profile)
+    {
+        var lines = new List<string>();
+        var haystack = $"{job.Title} {job.Company} {job.Location} {job.Description}";
+
+        if (!string.IsNullOrWhiteSpace(profile.Keyword))
+            lines.Add($"Keyword: {profile.Keyword}" + (Has(job.Title, profile.Keyword) ? " (in title)" : ""));
+
+        var include = Split(profile.Include).Where(k => Has(haystack, k)).ToList();
+        if (include.Count > 0) lines.Add($"Include: {string.Join(", ", include)}");
+
+        var exclude = Split(profile.Exclude);
+        if (exclude.Count > 0) lines.Add($"Exclude: no title match ({string.Join(", ", exclude)})");
+
+        var companies = Split(profile.Companies).Where(c => Has(job.Company, c)).ToList();
+        if (companies.Count > 0) lines.Add($"Company: {string.Join(", ", companies)}");
+
+        var locations = Split(profile.Locations).Where(l => Has(job.Location, l)).ToList();
+        if (locations.Count > 0) lines.Add($"Location: {string.Join(", ", locations)}");
+
+        if (profile.RemoteOnly)
+        {
+            var marker = RemoteMarkers.FirstOrDefault(mk => Has(haystack, mk));
+            lines.Add(marker is null ? "Remote only" : $"Remote only (found \"{marker}\")");
+        }
+
+        if (profile.MinSalary is { } min && job.Salary is { } salary)
+            lines.Add($"Salary: {salary:N0} (min {min:N0})");
+
+        return lines;
+    }
+
     public static List<string> Split(string? csv) =>
         (csv ?? "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

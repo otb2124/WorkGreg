@@ -333,7 +333,7 @@ public sealed partial class PollRunner(
                 continue;
             }
 
-            await notifier.SendAsync(owner, FormatMessage(job, source.Name, profile.Name), ct);
+            await notifier.SendAsync(owner, FormatMessage(job, source.Name, profile), ct);
             job.Processed = true;
             job.Delivered = true;
             sent++;
@@ -352,18 +352,77 @@ public sealed partial class PollRunner(
         return new Delivery(sent, waiting, filteredOut, duplicates);
     }
 
-    private static string FormatMessage(Job job, string sourceName, string profileName)
+    private const int SnippetLength = 350;
+    private const int MaxLineLength = 200;
+
+    private static string FormatMessage(Job job, string sourceName, SearchProfile profile)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"<b>{Html(job.Title)}</b>");
 
-        var meta = string.Join(" · ", new[] { job.Company, job.Location }.Where(x => !string.IsNullOrWhiteSpace(x)));
-        if (meta.Length > 0) sb.AppendLine(Html(meta));
+        // Who / where
+        if (!string.IsNullOrWhiteSpace(job.Company)) sb.AppendLine($"🏢 {Html(job.Company)}");
 
-        sb.AppendLine($"<i>{Html(profileName)} · {Html(sourceName)}</i>");
+        var where = new List<string>();
+        if (!string.IsNullOrWhiteSpace(job.Location)) where.Add($"📍 {Html(job.Location)}");
+        if (FilterEngine.IsRemote(job)) where.Add("🌐 Remote");
+        if (where.Count > 0) sb.AppendLine(string.Join(" · ", where));
+
+        // Terms
+        var terms = new List<string>();
+        if (!string.IsNullOrWhiteSpace(job.EmploymentType)) terms.Add($"💼 {Html(job.EmploymentType)}");
+        if (job.Salary is { } salary) terms.Add($"💰 {salary:N0}");
+        if (terms.Count > 0) sb.AppendLine(string.Join(" · ", terms));
+
+        // Freshness
+        sb.AppendLine(job.PostedUtc is { } posted
+            ? $"🕒 Posted {Ago(posted)} ({posted:yyyy-MM-dd})"
+            : $"🕒 First seen {Ago(job.FirstSeenUtc)}");
+
+        sb.AppendLine($"🔎 <i>{Html(profile.Name)} · {Html(sourceName)}</i>");
+
+        // Why it matched
+        var criteria = FilterEngine.Explain(job, profile);
+        if (criteria.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("✅ <b>Matched</b>");
+            foreach (var line in criteria)
+                sb.AppendLine($"• {Html(Truncate(line, MaxLineLength))}");
+        }
+
+        // Description preview
+        var snippet = Snippet(job.Description);
+        if (snippet.Length > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"📝 {Html(snippet)}");
+        }
+
+        sb.AppendLine();
         sb.Append($"<a href=\"{WebUtility.HtmlEncode(job.Url)}\">Open vacancy</a>");
         return sb.ToString();
     }
+
+    private static string Ago(DateTime utc)
+    {
+        var span = DateTime.UtcNow - utc;
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        if (span.TotalMinutes < 60) return $"{Math.Max(1, (int)span.TotalMinutes)} min ago";
+        if (span.TotalHours < 24) return $"{(int)span.TotalHours} h ago";
+        if (span.TotalDays < 2) return "yesterday";
+        return $"{(int)span.TotalDays} days ago";
+    }
+
+    private static string Snippet(string? description)
+    {
+        if (string.IsNullOrWhiteSpace(description)) return "";
+        var text = WebUtility.HtmlDecode(HtmlTags().Replace(description, " "));
+        text = Whitespace().Replace(text, " ").Trim();
+        return Truncate(text, SnippetLength);
+    }
+
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max].TrimEnd() + "…";
 
     private async Task SafeSendAsync(long chatId, string html, CancellationToken ct)
     {
@@ -383,4 +442,6 @@ public sealed partial class PollRunner(
     }
 
     [GeneratedRegex(@"[^\p{L}\p{N}]")] private static partial Regex NonAlnum();
+    [GeneratedRegex(@"<[^>]+>")] private static partial Regex HtmlTags();
+    [GeneratedRegex(@"\s+")] private static partial Regex Whitespace();
 }
