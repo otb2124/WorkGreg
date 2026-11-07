@@ -1,11 +1,9 @@
 using System.Collections.Concurrent;
-using System.Net;
 using System.Text;
-using Microsoft.EntityFrameworkCore;
-using WorkGreg.Data;
 using WorkGreg.Domain;
-using WorkGreg.Fetching;
+using WorkGreg.Services;
 using global::Telegram.Bot.Types.ReplyMarkups;
+using static WorkGreg.Telegram.Replies;
 
 namespace WorkGreg.Telegram;
 
@@ -29,8 +27,9 @@ public sealed class PendingInputStore
 }
 
 /// <summary>
-/// Button-driven UI on top of <see cref="CommandHandler"/>. Every change is applied by calling the
-/// existing slash-command logic, so validation lives in exactly one place.
+/// Button-driven UI. Turns callback data and typed answers into service calls and renders the results as screens.
+/// Validation and persistence live in the services, so a failure is a <see cref="Result{T, TError}"/> here,
+/// not a text that has to be sniffed.
 ///
 /// A "profile" is one job hunt (<see cref="SearchProfile"/>): keyword + filters + sources.
 ///
@@ -48,8 +47,15 @@ public sealed class PendingInputStore
 ///        screens: home | pls | dlv | p:&lt;id&gt; | pf:&lt;id&gt; | ps:&lt;id&gt;
 ///   dlvi | dlvd | dlvh:&lt;hour&gt;
 /// </summary>
-public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegistry fetchers, PendingInputStore pending)
+public sealed class MenuHandler(
+    ProfileService profiles,
+    SourceService sources,
+    SettingsService settings,
+    JobService jobs,
+    PendingInputStore pending)
 {
+    private const string NoSuchProfile = "No such profile.";
+
     // ------------------------------------------------------------------ public API
 
     public static bool IsSlow(string data) => data == "chk";
@@ -60,23 +66,22 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     public async Task<Screen> MainAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var settings = await SettingsAsync(chatId, ct);
-        var profiles = await db.SearchProfiles.Where(p => p.OwnerChatId == chatId).ToListAsync(ct);
-        var sources = await db.Sources.Where(s => s.OwnerChatId == chatId).ToListAsync(ct);
-        var failing = sources.Count(s => s.ConsecutiveFailures > 0);
+        var user = await settings.GetAsync(chatId, ct);
+        var all = await profiles.ListAsync(chatId, ct);
+        var failing = all.Sum(d => d.Sources.Count(s => s.ConsecutiveFailures > 0));
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
         sb.AppendLine("<b>🧭 WorkGreg · job watcher</b>");
         sb.AppendLine();
-        sb.AppendLine($"Status: {(settings.Paused ? "⏸ paused" : "▶️ active")}");
-        sb.AppendLine($"Profiles: {profiles.Count} ({profiles.Count(p => p.Enabled)} active){(failing > 0 ? $"  (❌ {failing} failing sources)" : "")}");
-        sb.Append($"Delivery: {DeliveryText(settings)}");
+        sb.AppendLine($"Status: {(user.Paused ? "⏸ paused" : "▶️ active")}");
+        sb.AppendLine($"Profiles: {all.Count} ({all.Count(d => d.Profile.Enabled)} active){(failing > 0 ? $"  (❌ {failing} failing sources)" : "")}");
+        sb.Append($"Delivery: {DeliveryText(user)}");
 
         var kb = Kb(
-            Row(Btn($"📂 Profiles ({profiles.Count})", "pls"), Btn("📬 Delivery", "dlv")),
+            Row(Btn($"📂 Profiles ({all.Count})", "pls"), Btn("📬 Delivery", "dlv")),
             Row(Btn("🔎 Check now", "chk")),
-            Row(settings.Paused ? Btn("▶️ Resume alerts", "pause:0") : Btn("⏸ Pause alerts", "pause:1")),
+            Row(user.Paused ? Btn("▶️ Resume alerts", "pause:0") : Btn("⏸ Pause alerts", "pause:1")),
             Row(Btn("🔁 Resend all matches", "rst")),
             Row(Btn("❓ Help", "help")));
 
@@ -110,20 +115,14 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 return await RenderAsync(chatId, data, ct);
 
             case "chk":
-                {
-                    var reply = await commands.HandleAsync(chatId, "/check", ct);
-                    return await MainAsync(chatId, Ok(reply), ct);
-                }
+                return await MainAsync(chatId, Notice(await jobs.CheckNowAsync(chatId, ct), CheckFinished), ct);
 
             case "pause":
-                {
-                    var reply = await commands.HandleAsync(chatId, arg == "1" ? "/pause" : "/resume", ct);
-                    return await MainAsync(chatId, Ok(reply), ct);
-                }
+                return await MainAsync(chatId, Notice(await settings.SetPausedAsync(chatId, arg == "1", ct), Paused), ct);
 
             case "rst":
                 {
-                    var total = await db.Jobs.CountAsync(j => j.OwnerChatId == chatId, ct);
+                    var total = await jobs.CountStoredAsync(chatId, ct);
                     var kb = Kb(Row(Btn("🔁 Yes, reset", "rstok"), Btn("✖ Cancel", "home")));
                     return new Screen(
                         "<b>🔁 Resend all matches?</b>\n" +
@@ -134,10 +133,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 }
 
             case "rstok":
-                {
-                    var reply = await commands.HandleAsync(chatId, "/resend", ct);
-                    return await MainAsync(chatId, Ok(reply), ct);
-                }
+                return await MainAsync(chatId, Notice(await jobs.ResendAllAsync(chatId, ct), Resent), ct);
 
             // ---- profiles
 
@@ -147,18 +143,25 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
             case "pen":
                 {
-                    var p = await FindProfileAsync(chatId, arg, ct);
-                    if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
-                    await commands.HandleAsync(chatId, $"{(p.Enabled ? "/disable" : "/enable")} {p.Id}", ct);
-                    return (await ProfileAsync(chatId, arg, null, ct)) with { Toast = p.Enabled ? "Profile disabled" : "Profile enabled" };
+                    var d = await LoadAsync(chatId, arg, ct);
+                    if (d is null) return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
+
+                    var enable = !d.Profile.Enabled;
+                    var result = await profiles.SetEnabledAsync(chatId, d.Profile.Id, enable, ct);
+                    if (result.IsFailure) return await ProfilesAsync(chatId, Fail(result.Error), ct);
+
+                    return (await ProfileAsync(chatId, arg, null, ct)) with { Toast = enable ? "Profile enabled" : "Profile disabled" };
                 }
 
             case "prem":
                 {
-                    var p = await FindProfileAsync(chatId, arg, ct);
-                    if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
-                    var on = !p.RemoteOnly;
-                    await commands.HandleAsync(chatId, $"/remote {p.Id} {(on ? "on" : "off")}", ct);
+                    var d = await LoadAsync(chatId, arg, ct);
+                    if (d is null) return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
+
+                    var on = !d.Profile.RemoteOnly;
+                    var result = await profiles.SetRemoteOnlyAsync(chatId, d.Profile.Id, on, ct);
+                    if (result.IsFailure) return await FiltersAsync(chatId, arg, Fail(result.Error), ct);
+
                     return (await FiltersAsync(chatId, arg, null, ct)) with { Toast = $"Remote only: {(on ? "on" : "off")}" };
                 }
 
@@ -166,26 +169,26 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 {
                     // arg = "<profileId>:<providerId>[:<region>]": add the source if the profile lacks it, remove it otherwise.
                     var bits = arg.Split(':', 3);
-                    var p = await FindProfileAsync(chatId, bits[0], ct);
-                    if (p is null || bits.Length < 2) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+                    if (bits.Length < 2 || !int.TryParse(bits[0], out var profileId))
+                        return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
 
-                    var providerId = bits[1];
                     var back = bits.Length > 2 ? $"{bits[0]}:{bits[2]}" : bits[0];   // stay on the same region page
 
-                    var has = await db.Sources.AnyAsync(
-                        s => s.SearchProfileId == p.Id && s.Provider == providerId, ct);
-                    var reply = await commands.HandleAsync(chatId, $"{(has ? "/removesource" : "/addsource")} {p.Id} {providerId}", ct);
+                    var result = await sources.ToggleAsync(chatId, profileId, bits[1], ct);
+                    if (result.IsFailure)
+                        return result.Error.Kind == ErrorKind.NotFound
+                            ? await ProfilesAsync(chatId, Fail(result.Error), ct)
+                            : await SourcesAsync(chatId, back, Fail(result.Error), ct);
 
-                    return CommandHandler.IsError(reply)
-                        ? await SourcesAsync(chatId, back, Warn(reply), ct)
-                        : (await SourcesAsync(chatId, back, null, ct)) with { Toast = has ? "Source removed" : "Source added" };
+                    return (await SourcesAsync(chatId, back, null, ct)) with { Toast = result.Value.Added ? "Source added" : "Source removed" };
                 }
 
             case "pdel":
                 {
-                    var p = await FindProfileAsync(chatId, arg, ct);
-                    if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+                    var d = await LoadAsync(chatId, arg, ct);
+                    if (d is null) return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
 
+                    var p = d.Profile;
                     var kb = Kb(Row(Btn("🗑 Yes, remove", $"pdelok:{p.Id}"), Btn("✖ Cancel", $"p:{p.Id}")));
                     return new Screen(
                         $"<b>Remove profile {Html(p.Name)}?</b>\n" +
@@ -196,8 +199,10 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
             case "pdelok":
                 {
-                    var reply = await commands.HandleAsync(chatId, $"/removeprofile {arg}", ct);
-                    return await ProfilesAsync(chatId, CommandHandler.IsError(reply) ? Warn(reply) : Ok(reply), ct);
+                    var result = int.TryParse(arg, out var id)
+                        ? await profiles.RemoveAsync(chatId, id, ct)
+                        : Error.NotFound(NoSuchProfile);
+                    return await ProfilesAsync(chatId, Notice(result, ProfileRemoved), ct);
                 }
 
             // ---- prompts
@@ -210,18 +215,22 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 {
                     pending.Clear(chatId);
                     var bits = arg.Split(':', 2);
-                    var cmd = bits[0] switch
+                    var idText = bits.Length > 1 ? bits[1] : "";
+
+                    // Clearing can only fail when the profile is gone; the filters page then shows "No such profile."
+                    if (int.TryParse(idText, out var id))
                     {
-                        "inc" => "/include",
-                        "exc" => "/exclude",
-                        "com" => "/companies",
-                        "loc" => "/locations",
-                        "sal" => "/salary",
-                        _ => null
-                    };
-                    var id = bits.Length > 1 ? bits[1] : "";
-                    if (cmd is not null) await commands.HandleAsync(chatId, bits[0] == "sal" ? $"{cmd} {id} off" : $"{cmd} {id}", ct);
-                    return (await FiltersAsync(chatId, id, null, ct)) with { Toast = "Cleared" };
+                        switch (bits[0])
+                        {
+                            case "inc": await profiles.SetIncludeAsync(chatId, id, null, ct); break;
+                            case "exc": await profiles.SetExcludeAsync(chatId, id, null, ct); break;
+                            case "com": await profiles.SetCompaniesAsync(chatId, id, null, ct); break;
+                            case "loc": await profiles.SetLocationsAsync(chatId, id, null, ct); break;
+                            case "sal": await profiles.SetMinSalaryAsync(chatId, id, null, ct); break;
+                        }
+                    }
+
+                    return (await FiltersAsync(chatId, idText, null, ct)) with { Toast = "Cleared" };
                 }
 
             case "cancel":
@@ -232,7 +241,9 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
             case "dlvi":
                 {
-                    await commands.HandleAsync(chatId, "/delivery instant", ct);
+                    var result = await settings.SetDeliveryAsync(chatId, DeliveryMode.Instant, null, ct);
+                    if (result.IsFailure) return await DeliveryAsync(chatId, Fail(result.Error), ct);
+
                     return (await DeliveryAsync(chatId, null, ct)) with { Toast = "Delivery: instant" };
                 }
 
@@ -241,8 +252,13 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
             case "dlvh":
                 {
-                    await commands.HandleAsync(chatId, $"/delivery digest {arg}", ct);
-                    return (await DeliveryAsync(chatId, null, ct)) with { Toast = $"Digest at {arg.PadLeft(2, '0')}:00 UTC" };
+                    if (!int.TryParse(arg, out var hour))
+                        return await DeliveryAsync(chatId, Warn("Pick an hour between 0 and 23."), ct);
+
+                    var result = await settings.SetDeliveryAsync(chatId, DeliveryMode.Digest, hour, ct);
+                    if (result.IsFailure) return await DeliveryAsync(chatId, Fail(result.Error), ct);
+
+                    return (await DeliveryAsync(chatId, null, ct)) with { Toast = $"Digest at {hour:00}:00 UTC" };
                 }
 
             default:
@@ -258,30 +274,38 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
         var kindParts = pend.Kind.Split(':', 2);
         var kind = kindParts[0];
-        var pid = kindParts.Length > 1 ? kindParts[1] : "";
+        var profileId = kindParts.Length > 1 && int.TryParse(kindParts[1], out var parsed) ? parsed : 0;   // 0 = no such profile
+        var idText = kindParts.Length > 1 ? kindParts[1] : "";
 
         var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var isList = kind is "inc" or "exc" or "com" or "loc";
         var input = string.Join(isList ? ", " : " ", lines);
         var clear = input is "-" or "clear" or "off";
+        var csv = clear ? "" : input;
 
-        string command;
+        Result<SearchProfile, Error> result;
         switch (kind)
         {
-            case "newp": command = $"/addprofile {input}"; break;
-            case "kw": command = $"/keyword {pid} {input}"; break;
-            case "nm": command = $"/name {pid} {input}"; break;
-            case "inc": command = $"/include {pid} {(clear ? "" : input)}"; break;
-            case "exc": command = $"/exclude {pid} {(clear ? "" : input)}"; break;
-            case "com": command = $"/companies {pid} {(clear ? "" : input)}"; break;
-            case "loc": command = $"/locations {pid} {(clear ? "" : input)}"; break;
+            case "newp": result = await profiles.CreateAsync(chatId, new ProfileDraft(input), ct); break;
+            case "kw": result = await profiles.SetKeywordAsync(chatId, profileId, input, ct); break;
+            case "nm": result = await profiles.RenameAsync(chatId, profileId, input, ct); break;
+            case "inc": result = await profiles.SetIncludeAsync(chatId, profileId, csv, ct); break;
+            case "exc": result = await profiles.SetExcludeAsync(chatId, profileId, csv, ct); break;
+            case "com": result = await profiles.SetCompaniesAsync(chatId, profileId, csv, ct); break;
+            case "loc": result = await profiles.SetLocationsAsync(chatId, profileId, csv, ct); break;
 
             case "sal":
-                if (clear) { command = $"/salary {pid} off"; break; }
+                if (clear)
+                {
+                    result = await profiles.SetMinSalaryAsync(chatId, profileId, null, ct);
+                    break;
+                }
+
                 if (!int.TryParse(input, out var salary) || salary <= 0)
                     return new TextResult(pend.MessageId,
                         await PromptAsync(chatId, pend.Kind, Warn("Please send a positive whole number."), ct));
-                command = $"/salary {pid} {salary}";
+
+                result = await profiles.SetMinSalaryAsync(chatId, profileId, salary, ct);
                 break;
 
             default:
@@ -289,35 +313,34 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 return new TextResult(pend.MessageId, await MainAsync(chatId, null, ct));
         }
 
-        var reply = await commands.HandleAsync(chatId, command, ct);
-
         // A validation error: ask again.
-        if (CommandHandler.IsError(reply))
-            return new TextResult(pend.MessageId, await PromptAsync(chatId, pend.Kind, Warn(reply), ct));
+        if (result.IsFailure)
+            return new TextResult(pend.MessageId, await PromptAsync(chatId, pend.Kind, Fail(result.Error), ct));
 
         pending.Clear(chatId);
+        var profile = result.Value;
 
-        switch (kind)
+        return kind switch
         {
-            case "newp":
-                {
-                    // The profile just created is the newest one of this user.
-                    var created = await db.SearchProfiles
-                        .Where(p => p.OwnerChatId == chatId)
-                        .OrderByDescending(p => p.Id)
-                        .FirstAsync(ct);
-                    return new TextResult(pend.MessageId,
-                        await ProfileAsync(chatId, created.Id.ToString(), Ok(reply), ct));
-                }
-
-            case "kw":
-            case "nm":
-                return new TextResult(pend.MessageId, await ProfileAsync(chatId, pid, Ok(reply), ct));
-
-            default:
-                return new TextResult(pend.MessageId, await FiltersAsync(chatId, pid, Ok(reply), ct));
-        }
+            "newp" => new TextResult(pend.MessageId,
+                await ProfileAsync(chatId, profile.Id.ToString(), Ok(ProfileAdded(profile)), ct)),
+            "kw" => new TextResult(pend.MessageId,
+                await ProfileAsync(chatId, idText, Ok(KeywordChanged(profile)), ct)),
+            "nm" => new TextResult(pend.MessageId,
+                await ProfileAsync(chatId, idText, Ok(ProfileRenamed(profile)), ct)),
+            _ => new TextResult(pend.MessageId,
+                await FiltersAsync(chatId, idText, Ok(FilterReply(kind, profile)), ct))
+        };
     }
+
+    private static string FilterReply(string kind, SearchProfile p) => kind switch
+    {
+        "inc" => IncludeSet(p),
+        "exc" => ExcludeSet(p),
+        "com" => CompaniesSet(p),
+        "loc" => LocationsSet(p),
+        _ => SalarySet(p)
+    };
 
     // ------------------------------------------------------------------ screens
 
@@ -339,21 +362,21 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> ProfilesAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var profiles = await db.SearchProfiles.Where(p => p.OwnerChatId == chatId).OrderBy(p => p.Id).ToListAsync(ct);
+        var all = await profiles.ListAsync(chatId, ct);
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
         sb.AppendLine("<b>📂 Profiles</b>");
         sb.AppendLine();
-        sb.Append(profiles.Count == 0
+        sb.Append(all.Count == 0
             ? "<i>No profiles yet.</i> A profile is one job hunt: a keyword (e.g. <code>full stack dev</code>), its own filters and its own sources."
             : "Each profile has its own keyword, filters and sources. Tap one to edit it.");
 
-        var rows = profiles
-            .Select(p => Row(Btn($"{(p.Enabled ? "▶️" : "⏸")} {Short(p.Name, 28)}", $"p:{p.Id}")))
+        var rows = all
+            .Select(d => Row(Btn($"{(d.Profile.Enabled ? "▶️" : "⏸")} {Short(d.Profile.Name, 28)}", $"p:{d.Profile.Id}")))
             .ToList();
 
-        if (profiles.Count < ProfileRules.MaxProfilesPerUser)
+        if (all.Count < ProfileRules.MaxProfilesPerUser)
             rows.Add(Row(Btn("➕ New profile", "np")));
         rows.Add(Row(Btn("⬅ Back", "home")));
 
@@ -362,10 +385,10 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> ProfileAsync(long chatId, string idText, string? notice, CancellationToken ct)
     {
-        var p = await FindProfileAsync(chatId, idText, ct);
-        if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+        var d = await LoadAsync(chatId, idText, ct);
+        if (d is null) return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
 
-        var sources = await db.Sources.Where(s => s.SearchProfileId == p.Id).OrderBy(s => s.Id).ToListAsync(ct);
+        var (p, list) = d;
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
@@ -375,21 +398,21 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         sb.AppendLine($"🔎 Keyword: {Html(p.Keyword)}");
         sb.AppendLine($"🎯 Filters: {ActiveFilterCount(p)} active");
 
-        if (sources.Count == 0)
+        if (list.Count == 0)
         {
             sb.Append("📡 Sources: <i>none yet, tap Sources to add some.</i>");
         }
         else
         {
             sb.AppendLine("📡 Sources:");
-            for (var i = 0; i < sources.Count; i++)
+            for (var i = 0; i < list.Count; i++)
             {
-                var s = sources[i];
+                var s = list[i];
                 var status = s.ConsecutiveFailures > 0
                     ? $"❌ failing ({s.ConsecutiveFailures}x): {Html(Short(s.LastError ?? "", 120))}"
                     : s.LastSuccessUtc is null ? "⏳ not checked yet" : $"✅ ok · {s.LastSuccessUtc:yyyy-MM-dd HH:mm} UTC";
                 var line = $"  • {Html(s.Name)}: {status}";
-                if (i < sources.Count - 1) sb.AppendLine(line); else sb.Append(line);
+                if (i < list.Count - 1) sb.AppendLine(line); else sb.Append(line);
             }
         }
 
@@ -408,18 +431,16 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         var idParts = idText.Split(':', 2);
         var regionId = idParts.Length > 1 ? idParts[1] : null;
 
-        var p = await FindProfileAsync(chatId, idParts[0], ct);
-        if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+        var d = await LoadAsync(chatId, idParts[0], ct);
+        if (d is null) return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
 
-        var attached = await db.Sources
-            .Where(s => s.SearchProfileId == p.Id)
-            .Select(s => s.Provider)
-            .ToListAsync(ct);
+        var p = d.Profile;
+        var attached = d.Sources.Select(s => s.Provider).ToList();
 
         bool On(SourceProvider x) => attached.Contains(x.Id, StringComparer.OrdinalIgnoreCase);
 
         // Only sources that can actually be fetched right now.
-        var available = SourceCatalog.All.Where(x => fetchers.Get(x.Type).IsAvailable).ToList();
+        var available = sources.AvailableProviders();
 
         var region = SourceCatalog.Regions.FirstOrDefault(r => r.Id == regionId);
 
@@ -461,8 +482,10 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> FiltersAsync(long chatId, string idText, string? notice, CancellationToken ct)
     {
-        var p = await FindProfileAsync(chatId, idText, ct);
-        if (p is null) return await ProfilesAsync(chatId, Warn("No such profile."), ct);
+        var d = await LoadAsync(chatId, idText, ct);
+        if (d is null) return await ProfilesAsync(chatId, Warn(NoSuchProfile), ct);
+
+        var p = d.Profile;
 
         string Show(string s, string empty) => s.Length > 0 ? Html(Short(s)) : $"<i>{empty}</i>";
 
@@ -491,15 +514,15 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> DeliveryAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var p = await SettingsAsync(chatId, ct);
-        var digest = p.Delivery == DeliveryMode.Digest;
+        var user = await settings.GetAsync(chatId, ct);
+        var digest = user.Delivery == DeliveryMode.Digest;
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
         sb.AppendLine("<b>📬 Delivery</b>");
         sb.AppendLine("<i>Applies to all profiles.</i>");
         sb.AppendLine();
-        sb.AppendLine($"Now: {DeliveryText(p)}");
+        sb.AppendLine($"Now: {DeliveryText(user)}");
         sb.AppendLine();
         sb.AppendLine("⚡ <b>Instant</b>: new matches arrive as soon as a check finds them (hourly).");
         sb.Append("🗓 <b>Daily digest</b>: matches are sent once a day, at the hour you pick (UTC).");
@@ -509,7 +532,7 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
             Row(Btn((digest ? "" : "✅ ") + "⚡ Instant", "dlvi"),
                 Btn((digest ? "✅ " : "") + "🗓 Daily digest", "dlvd"))
         };
-        if (digest) rows.Add(Row(Btn($"🕘 Change hour ({p.DigestHourUtc:00}:00 UTC)", "dlvd")));
+        if (digest) rows.Add(Row(Btn($"🕘 Change hour ({user.DigestHourUtc:00}:00 UTC)", "dlvd")));
         rows.Add(Row(Btn("⬅ Back", "home")));
 
         return new Screen(sb.ToString(), new InlineKeyboardMarkup(rows.ToArray()));
@@ -517,14 +540,14 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     private async Task<Screen> HourPickerAsync(long chatId, CancellationToken ct)
     {
-        var p = await SettingsAsync(chatId, ct);
+        var user = await settings.GetAsync(chatId, ct);
         var rows = new List<InlineKeyboardButton[]>();
 
         for (var start = 0; start < 24; start += 6)
         {
             rows.Add(Enumerable.Range(start, 6)
                 .Select(h => Btn(
-                    p.Delivery == DeliveryMode.Digest && p.DigestHourUtc == h ? $"✅{h:00}" : $"{h:00}",
+                    user.Delivery == DeliveryMode.Digest && user.DigestHourUtc == h ? $"✅{h:00}" : $"{h:00}",
                     $"dlvh:{h}"))
                 .ToArray());
         }
@@ -573,10 +596,11 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
                 "It also becomes the profile's name (you can rename it later). Afterwards you pick its sources and filters.",
                 "pls", false);
 
-        var p = bits.Length > 1 ? await FindProfileAsync(chatId, bits[1], ct) : null;
-        if (p is null)
+        var d = bits.Length > 1 ? await LoadAsync(chatId, bits[1], ct) : null;
+        if (d is null)
             return new("Profile not found", null, "That profile doesn't exist (anymore).", "pls", false);
 
+        var p = d.Profile;
         var filtersBack = $"pf:{p.Id}";
         var profileBack = $"p:{p.Id}";
 
@@ -643,13 +667,18 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
 
     // ------------------------------------------------------------------ helpers
 
-    private async Task<UserProfile> SettingsAsync(long chatId, CancellationToken ct) =>
-        await db.Profiles.FindAsync(new object[] { chatId }, ct) ?? new UserProfile { ChatId = chatId };
+    /// <summary>Loads a profile for a screen. Null when the id is not a number, or the profile is gone or not yours.</summary>
+    private async Task<ProfileDetails?> LoadAsync(long chatId, string idText, CancellationToken ct)
+    {
+        if (!int.TryParse(idText, out var id)) return null;
 
-    private async Task<SearchProfile?> FindProfileAsync(long chatId, string idText, CancellationToken ct) =>
-        int.TryParse(idText, out var id)
-            ? await db.SearchProfiles.FirstOrDefaultAsync(p => p.Id == id && p.OwnerChatId == chatId, ct)
-            : null;
+        var result = await profiles.GetAsync(chatId, id, ct);
+        return result.IsSuccess ? result.Value : null;
+    }
+
+    /// <summary>The line shown above a screen after an action: ✅ with the success text, or ⚠️ with the error.</summary>
+    private static string Notice<T>(Result<T, Error> result, Func<T, string> ok) =>
+        result.IsSuccess ? Ok(ok(result.Value)) : Fail(result.Error);
 
     private static int ActiveFilterCount(SearchProfile p) =>
         new[]
@@ -668,9 +697,6 @@ public sealed class MenuHandler(AppDb db, CommandHandler commands, FetcherRegist
         sb.AppendLine();
     }
 
-    private static string Ok(string html) => "✅ " + html;
-    private static string Warn(string html) => html.StartsWith(CommandHandler.ErrorPrefix, StringComparison.Ordinal) ? html : CommandHandler.ErrorPrefix + html;
-    private static string Html(string? s) => WebUtility.HtmlEncode(s ?? "");
     private static string Short(string s, int max = 300) => s.Length <= max ? s : s[..max] + "…";
 
     private static InlineKeyboardButton Btn(string text, string data) => InlineKeyboardButton.WithCallbackData(text, data);

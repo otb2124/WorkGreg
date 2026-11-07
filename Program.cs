@@ -9,6 +9,7 @@ builder.Services
     .AddWorkGregOptions()
     .AddPersistence(builder.Configuration)
     .AddFetching()
+    .AddApplicationServices()
     .AddTelegramBot()
     .AddPolling()
     .AddWorkGregApi(builder.Configuration);

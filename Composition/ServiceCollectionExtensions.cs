@@ -52,6 +52,16 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Use cases shared by the Telegram bot and the HTTP API. Both are thin adapters on top of these.</summary>
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+    {
+        services.AddScoped<ProfileService>();
+        services.AddScoped<SourceService>();
+        services.AddScoped<SettingsService>();
+        services.AddScoped<JobService>();
+        return services;
+    }
+
     public static IServiceCollection AddTelegramBot(this IServiceCollection services)
     {
         // The token is checked by BotOptionsValidator at startup, so no manual throw is needed here.
