@@ -360,12 +360,18 @@ public sealed class CommandHandler(AppDb db, FetcherRegistry fetchers, PollRunne
 
     private async Task<string> CheckNowAsync(long chatId, CancellationToken ct)
     {
-        if (runner.IsRunning) return "A check is already running. Send /stop to cancel it.";
+        switch (runner.StatusFor(chatId))
+        {
+            case RunStatus.Yours:
+                return "A check is already running. Send /stop to cancel it.";
+            case RunStatus.Scheduled:
+                return "The hourly check is running right now. Your vacancies arrive as it goes.";
+        }
 
-        var sent = await runner.RunAsync(chatId, ct);
-        return runner.LastRunStopped
-            ? $"⏹ Check stopped. {sent} vacancies were sent before it stopped."
-            : $"Check finished. {sent} new vacancies sent.";
+        var result = await runner.RunAsync(chatId, ct);
+        return result.Stopped
+            ? $"⏹ Check stopped. {result.Sent} vacancies were sent before it stopped."
+            : $"Check finished. {result.Sent} new vacancies sent.";
     }
 
     private async Task<string> ResendAsync(long chatId, CancellationToken ct)

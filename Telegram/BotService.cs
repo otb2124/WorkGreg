@@ -13,13 +13,13 @@ public sealed class BotService(
     ITelegramBotClient bot,
     IServiceScopeFactory scopes,
     IOptions<BotOptions> options,
-    PollRunner runner,                       // <-- NEW
+    PollRunner runner,
     ILogger<BotService> log) : BackgroundService, IUpdateHandler
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         var me = await bot.GetMe(ct);
-        log.LogInformation("Bot @{Username} is running", me.Username);
+        log.LogInformation("Bot @{Username} is running (access: {Access})", me.Username, options.Value.Access);
 
         try
         {
@@ -29,10 +29,10 @@ public sealed class BotService(
                 new BotCommand { Command = "menu", Description = "Open the main menu" },
                 new BotCommand { Command = "check", Description = "Check for new vacancies now" },
                 new BotCommand { Command = "help", Description = "List of text commands" },
-                new BotCommand { Command = "stop", Description = "Stop the check that is running" },
+                new BotCommand { Command = "stop", Description = "Stop the check you started" },
             }, cancellationToken: ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogWarning(ex, "Could not register bot commands");
         }
@@ -52,7 +52,9 @@ public sealed class BotService(
             else if (update.Message is { Text: not null } message)
                 await HandleMessageAsync(message, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Only a real shutdown is allowed to escape. A Telegram/HTTP timeout is also a cancellation
+        // exception, and it must not be rethrown into the receiver loop.
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogError(ex, "Update {UpdateId} failed", update.Id);
         }
@@ -65,7 +67,7 @@ public sealed class BotService(
         var chatId = message.Chat.Id;
         var text = message.Text!;
 
-        if (!IsAllowed(chatId))
+        if (!options.Value.IsAllowed(chatId))
         {
             log.LogWarning("Ignoring message from unauthorized chat {ChatId}", chatId);
             return;   // no reply sent
@@ -81,18 +83,25 @@ public sealed class BotService(
 
             if (CommandName(text) == "/stop")
             {
-                await Reply(chatId, runner.RequestStop()
-                    ? "⏹ Stopping… the check ends as soon as the request in progress is cancelled."
-                    : "No check is running right now.", ct);
+                await Reply(chatId, runner.RequestStop(chatId) switch
+                {
+                    StopOutcome.Stopped => "⏹ Stopping… the check ends as soon as the request in progress is cancelled.",
+                    StopOutcome.ScheduledRun => "The scheduled hourly check is running right now. It can't be stopped from chat.",
+                    _ => "No check of yours is running right now."
+                }, ct);
                 return;
             }
 
             if (CommandName(text) == "/check")
             {
-                if (runner.IsRunning)
+                switch (runner.StatusFor(chatId))
                 {
-                    await Reply(chatId, "A check is already running. Send /stop to cancel it.", ct);
-                    return;
+                    case RunStatus.Yours:
+                        await Reply(chatId, "A check is already running. Send /stop to cancel it.", ct);
+                        return;
+                    case RunStatus.Scheduled:
+                        await Reply(chatId, "The hourly check is running right now. Your vacancies arrive as it goes.", ct);
+                        return;
                 }
 
                 await Reply(chatId, "⏳ Checking your sources… vacancies arrive as they are found. Send /stop to cancel.", ct);
@@ -111,7 +120,7 @@ public sealed class BotService(
             {
                 reply = await scope.ServiceProvider.GetRequiredService<CommandHandler>().HandleAsync(chatId, text, ct);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 log.LogError(ex, "Command failed: {Text}", text);
                 reply = "Something went wrong, check the logs.";
@@ -127,7 +136,7 @@ public sealed class BotService(
         {
             result = await menu.HandleTextAsync(chatId, text, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogError(ex, "Text input failed: {Text}", text);
             menu.CancelPending(chatId);
@@ -158,7 +167,7 @@ public sealed class BotService(
         var chatId = msg.Chat.Id;
         var messageId = msg.MessageId;
 
-        if (!IsAllowed(chatId))
+        if (!options.Value.IsAllowed(chatId))
         {
             await SafeAnswer(cq.Id, null, ct);
             return;
@@ -166,16 +175,25 @@ public sealed class BotService(
 
         if (data == "stop")
         {
-            await SafeAnswer(cq.Id, runner.RequestStop() ? "Stopping…" : "No check is running", ct);
+            await SafeAnswer(cq.Id, runner.RequestStop(chatId) switch
+            {
+                StopOutcome.Stopped => "Stopping…",
+                StopOutcome.ScheduledRun => "The hourly check can't be stopped from chat",
+                _ => "No check of yours is running"
+            }, ct);
             return;
         }
 
         if (data == "chk")
         {
-            if (runner.IsRunning)
+            switch (runner.StatusFor(chatId))
             {
-                await SafeAnswer(cq.Id, "A check is already running", ct);
-                return;
+                case RunStatus.Yours:
+                    await SafeAnswer(cq.Id, "A check is already running", ct);
+                    return;
+                case RunStatus.Scheduled:
+                    await SafeAnswer(cq.Id, "The hourly check is running right now", ct);
+                    return;
             }
 
             await SafeAnswer(cq.Id, null, ct);
@@ -203,7 +221,7 @@ public sealed class BotService(
         {
             screen = await menu.HandleCallbackAsync(chatId, messageId, data, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogError(ex, "Callback failed: {Data}", data);
             if (!slow) await SafeAnswer(cq.Id, "Something went wrong, check the logs.", ct);
@@ -220,12 +238,6 @@ public sealed class BotService(
     {
         log.LogError(exception, "Telegram error from {Source}", source);
         return Task.CompletedTask;
-    }
-
-    private bool IsAllowed(long chatId)
-    {
-        var allowed = options.Value.AllowedChatIds;
-        return allowed.Length == 0 || allowed.Contains(chatId);
     }
 
     private static string CommandName(string text)
@@ -278,7 +290,7 @@ public sealed class BotService(
             var reply = await scope.ServiceProvider.GetRequiredService<CommandHandler>().HandleAsync(chatId, "/check", ct);
             await Reply(chatId, reply, ct);
         }
-        catch (OperationCanceledException) { /* app is shutting down */ }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* app is shutting down */ }
         catch (Exception ex)
         {
             log.LogError(ex, "Background check failed");
@@ -295,7 +307,7 @@ public sealed class BotService(
             var screen = await menu.HandleCallbackAsync(chatId, messageId, "chk", ct);   // runs the check, returns the main menu
             await EditScreen(chatId, messageId, screen, ct);
         }
-        catch (OperationCanceledException) { /* app is shutting down */ }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* app is shutting down */ }
         catch (Exception ex)
         {
             log.LogError(ex, "Background check (menu) failed");

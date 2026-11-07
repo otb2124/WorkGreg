@@ -10,6 +10,7 @@ public sealed class ApiKeyFilter(IOptions<ApiOptions> options) : IEndpointFilter
 {
     public ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
+        // Startup validation already refuses an empty key; this is a second line of defence.
         if (string.IsNullOrWhiteSpace(options.Value.ApiKey))
             return ValueTask.FromResult<object?>(Results.StatusCode(503));
 
@@ -22,7 +23,7 @@ public sealed class ApiKeyFilter(IOptions<ApiOptions> options) : IEndpointFilter
     }
 }
 
-/// <summary>Same rule as the bot: if Bot:AllowedChatIds is set, the {chatId} route value must be in it.</summary>
+/// <summary>Same rule as the bot (<see cref="BotOptions.IsAllowed"/>): the {chatId} route value must be allowed.</summary>
 public sealed class ChatAccessFilter(IOptions<BotOptions> options) : IEndpointFilter
 {
     public ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
@@ -30,8 +31,7 @@ public sealed class ChatAccessFilter(IOptions<BotOptions> options) : IEndpointFi
         if (!long.TryParse(context.HttpContext.Request.RouteValues["chatId"]?.ToString(), out var chatId))
             return ValueTask.FromResult<object?>(Results.BadRequest("Invalid chat id."));
 
-        var allowed = options.Value.AllowedChatIds;
-        if (allowed.Length > 0 && !allowed.Contains(chatId))
+        if (!options.Value.IsAllowed(chatId))
             return ValueTask.FromResult<object?>(Results.StatusCode(StatusCodes.Status403Forbidden));
 
         return next(context);

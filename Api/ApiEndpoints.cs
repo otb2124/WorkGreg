@@ -285,8 +285,8 @@ public static class ApiEndpoints
 
     private static async Task<IResult> CheckNow(long chatId, PollRunner runner, CancellationToken ct)
     {
-        var sent = await runner.RunAsync(chatId, ct);
-        return Results.Ok(new CheckResult(sent));
+        var result = await runner.RunAsync(chatId, ct);
+        return Results.Ok(new CheckResult(result.Sent));
     }
 
     // ---- Mapping ----

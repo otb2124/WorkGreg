@@ -1,5 +1,4 @@
 using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using WorkGreg.Data;
@@ -11,11 +10,38 @@ using Microsoft.Extensions.Options;
 
 namespace WorkGreg.Services;
 
+/// <summary>Outcome of one poll cycle.</summary>
+public readonly record struct PollResult(int Sent, bool Stopped);
+
+/// <summary>What is running right now, seen from one user's point of view.</summary>
+public enum RunStatus
+{
+    Idle,
+    /// <summary>The hourly all-users cycle. It covers everybody and can't be stopped from chat.</summary>
+    Scheduled,
+    /// <summary>A manual check started by this user.</summary>
+    Yours,
+    /// <summary>A manual check started by someone else. This user's own check would wait its turn.</summary>
+    Other
+}
+
+public enum StopOutcome
+{
+    Stopped,
+    /// <summary>Only the scheduled run is active; users can't stop it.</summary>
+    ScheduledRun,
+    /// <summary>Nothing is running, or the active run belongs to someone else.</summary>
+    NothingOfYours
+}
+
 /// <summary>
 /// One poll cycle. Sources are fetched ONE AT A TIME and each source's new vacancies are filtered and sent
 /// right after it is fetched. Once an owner has received MaxMessagesPerRun vacancies, none of their remaining
-/// sources are fetched in this cycle. Safe to call concurrently (calls are serialized) and safe to crash mid-way
+/// sources are fetched in this cycle. Runs are serialized (one at a time) and safe to crash mid-way
 /// (state is saved per job).
+///
+/// One owner's problem never aborts the cycle for the others: a chat that blocked the bot is disabled,
+/// a rate-limited or failing chat is skipped until the next cycle.
 /// </summary>
 public sealed partial class PollRunner(
     IServiceScopeFactory scopes,
@@ -26,25 +52,39 @@ public sealed partial class PollRunner(
 {
     private const int FailureAlertThreshold = 3;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly object _stopLock = new();
-    private CancellationTokenSource? _runCts;
-    private bool _stopRequested;
+    private readonly object _stateLock = new();
+    private ActiveRun? _active;
 
-    /// <summary>True while a poll cycle is executing.</summary>
-    public bool IsRunning => Volatile.Read(ref _runCts) is not null;
-
-    /// <summary>True if the most recent cycle ended because <see cref="RequestStop"/> was called.</summary>
-    public bool LastRunStopped { get; private set; }
-
-    /// <summary>Cancels the cycle in progress. Returns false if none is running.</summary>
-    public bool RequestStop()
+    private sealed class ActiveRun(long? owner, CancellationTokenSource cts)
     {
-        lock (_stopLock)
+        public long? Owner { get; } = owner;
+        public CancellationTokenSource Cts { get; } = cts;
+        public volatile bool StopRequested;
+    }
+
+    /// <summary>What is running, from the point of view of <paramref name="chatId"/>.</summary>
+    public RunStatus StatusFor(long chatId)
+    {
+        lock (_stateLock)
         {
-            if (_runCts is null) return false;
-            _stopRequested = true;
-            _runCts.Cancel();
-            return true;
+            if (_active is null) return RunStatus.Idle;
+            if (_active.Owner is null) return RunStatus.Scheduled;
+            return _active.Owner == chatId ? RunStatus.Yours : RunStatus.Other;
+        }
+    }
+
+    /// <summary>Cancels the manual check that <paramref name="chatId"/> started. Never touches anybody else's run.</summary>
+    public StopOutcome RequestStop(long chatId)
+    {
+        lock (_stateLock)
+        {
+            if (_active is null) return StopOutcome.NothingOfYours;
+            if (_active.Owner is null) return StopOutcome.ScheduledRun;
+            if (_active.Owner != chatId) return StopOutcome.NothingOfYours;
+
+            _active.StopRequested = true;
+            _active.Cts.Cancel();
+            return StopOutcome.Stopped;
         }
     }
 
@@ -52,18 +92,13 @@ public sealed partial class PollRunner(
     private readonly record struct Delivery(int Sent, int Waiting, int Filtered, int Duplicates);
 
     /// <param name="ownerChatId">Null = all users (scheduled run); otherwise only that user's profiles.</param>
-    /// <returns>Number of vacancies sent.</returns>
-    public async Task<int> RunAsync(long? ownerChatId, CancellationToken ct)
+    public async Task<PollResult> RunAsync(long? ownerChatId, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
 
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        lock (_stopLock)
-        {
-            _stopRequested = false;
-            LastRunStopped = false;
-            _runCts = runCts;
-        }
+        var run = new ActiveRun(ownerChatId, runCts);
+        lock (_stateLock) { _active = run; }
 
         var sentBy = new Dictionary<long, int>();
         try
@@ -89,6 +124,9 @@ public sealed partial class PollRunner(
             var skippedBy = owners.ToDictionary(o => o, _ => 0);
             var filteredBy = owners.ToDictionary(o => o, _ => 0);
 
+            // Owners we stop serving for the rest of this cycle: chat unreachable, rate limited, or failing.
+            var unavailable = new HashSet<long>();
+
             // Raw fetch results by (type, url) for this cycle: searches that share a URL cost one request
             // (e.g. two profiles that both use Remotive, whose URL doesn't depend on the keyword).
             var cache = new Dictionary<string, IReadOnlyList<FetchedJob>>();
@@ -103,29 +141,35 @@ public sealed partial class PollRunner(
                 runToken.ThrowIfCancellationRequested();
 
                 var owner = source.OwnerChatId;
+                if (unavailable.Contains(owner)) continue;
                 if (sentBy[owner] >= max)
                 {
                     skippedBy[owner]++;
                     continue;
                 }
 
-                await FetchSourceAsync(db, source, profiles[source.SearchProfileId], cache, runToken);
+                await FetchSourceAsync(db, source, profiles[source.SearchProfileId], cache, unavailable, runToken);
                 fetched++;
 
+                // The failure alert may have discovered that this chat is unreachable.
+                if (unavailable.Contains(owner)) continue;
+
                 // Send what THIS source just found, right now (newest first). Older leftovers don't jump the queue.
-                var d = await DeliverAsync(db, owner, max - sentBy[owner], source.Id, runToken);
+                var d = await DeliverSafelyAsync(db, owner, max - sentBy[owner], source.Id, unavailable, runToken);
                 sentBy[owner] += d.Sent;
                 filteredBy[owner] += d.Filtered;
 
-                // Everybody is full: stop fetching.
-                if (owners.All(o => sentBy[o] >= max)) break;
+                // Everybody is full (or out of reach): stop fetching.
+                if (owners.All(o => unavailable.Contains(o) || sentBy[o] >= max)) break;
             }
 
             // Leftovers from earlier runs go out only if there is room, newest first. With no room this
             // just counts what is waiting.
             foreach (var owner in owners)
             {
-                var d = await DeliverAsync(db, owner, max - sentBy[owner], null, runToken);
+                if (unavailable.Contains(owner)) continue;
+
+                var d = await DeliverSafelyAsync(db, owner, max - sentBy[owner], null, unavailable, runToken);
                 sentBy[owner] += d.Sent;
                 waitingBy[owner] = d.Waiting;
                 filteredBy[owner] += d.Filtered;
@@ -133,42 +177,46 @@ public sealed partial class PollRunner(
 
             foreach (var owner in owners)
             {
+                if (unavailable.Contains(owner)) continue;
+
                 var skipped = skippedBy[owner];
                 if (sentBy[owner] >= max && (waitingBy[owner] > 0 || skipped > 0))
-                    await SafeSendAsync(owner,
+                    await NotifyAsync(db, owner,
                         $"… limit of {max} reached for this run" +
                         (waitingBy[owner] > 0 ? $", {waitingBy[owner]} more matching vacancies are waiting" : "") +
                         (skipped > 0 ? $", {skipped} sources were not checked yet" : "") +
-                        ". They will arrive on the next run.", runToken);
+                        ". They will arrive on the next run.", unavailable, runToken);
                 else if (ownerChatId is not null && sentBy[owner] == 0 && filteredBy[owner] > 0)
                     // Manual /check found keyword matches but the profile's filters removed all of them.
-                    await SafeSendAsync(owner,
+                    await NotifyAsync(db, owner,
                         $"ℹ️ {filteredBy[owner]} vacancies matched your keyword but were dropped by your profile filters " +
-                        "(Include, Exclude, Companies, Locations, Min salary, Remote only). Open 🎯 Filters to check them.", runToken);
+                        "(Include, Exclude, Companies, Locations, Min salary, Remote only). Open 🎯 Filters to check them.",
+                        unavailable, runToken);
             }
 
             var sent = sentBy.Values.Sum();
-            log.LogInformation("Poll finished: {Fetched}/{Sources} sources checked, {Sent} vacancies sent (limit {Max} per user)",
-                fetched, sources.Count, sent, max);
-            return sent;
+            log.LogInformation(
+                "Poll finished: {Fetched}/{Sources} sources checked, {Sent} vacancies sent (limit {Max} per user), {Skipped} owner(s) skipped",
+                fetched, sources.Count, sent, max, unavailable.Count);
+            return new PollResult(sent, false);
         }
-        catch (OperationCanceledException) when (_stopRequested && !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (run.StopRequested && !ct.IsCancellationRequested)
         {
             // /stop (or the Stop button): not an error. Everything delivered so far is already saved.
-            LastRunStopped = true;
             var sent = sentBy.Values.Sum();
             log.LogInformation("Poll stopped by user: {Sent} vacancies sent before the stop", sent);
-            return sent;
+            return new PollResult(sent, true);
         }
         finally
         {
-            lock (_stopLock) { _runCts = null; }
+            lock (_stateLock) { _active = null; }
             _gate.Release();
         }
     }
 
     private async Task FetchSourceAsync(
-        AppDb db, Source source, SearchProfile profile, Dictionary<string, IReadOnlyList<FetchedJob>> cache, CancellationToken ct)
+        AppDb db, Source source, SearchProfile profile, Dictionary<string, IReadOnlyList<FetchedJob>> cache,
+        HashSet<long> unavailable, CancellationToken ct)
     {
         try
         {
@@ -215,6 +263,9 @@ public sealed partial class PollRunner(
                     .ToListAsync(ct))
                 .ToHashSet();
 
+            // Scope for vacancies without a company, see JobHasher.
+            var hashScope = source.Provider ?? $"source{source.Id}";
+
             var now = DateTime.UtcNow;
             var added = 0;
 
@@ -227,7 +278,7 @@ public sealed partial class PollRunner(
                     SourceId = source.Id,
                     OwnerChatId = source.OwnerChatId,
                     ExternalId = item.ExternalId,
-                    Hash = ComputeHash(item),
+                    Hash = JobHasher.Compute(item.Company, item.Title, hashScope),
                     Title = item.Title,
                     Company = item.Company,
                     Location = item.Location,
@@ -250,7 +301,10 @@ public sealed partial class PollRunner(
 
             log.LogInformation("Source {Id} '{Name}' (profile '{Profile}'): {Total} items match the keyword, {Added} new", source.Id, source.Name, profile.Name, items.Count, added);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // "!ct.IsCancellationRequested" instead of "is not OperationCanceledException": an HttpClient timeout
+        // is reported as a TaskCanceledException even though nobody cancelled us. That is an ordinary source
+        // failure, not a stop request, and must not abort the whole cycle.
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogWarning("Source {Id} '{Name}' (profile '{Profile}') failed: {Error}", source.Id, source.Name, profile.Name, ex.Message);
 
@@ -261,11 +315,56 @@ public sealed partial class PollRunner(
             // Usually means the site changed or blocked us. Tell the owner once, not every hour.
             if (source.ConsecutiveFailures == FailureAlertThreshold)
             {
-                await SafeSendAsync(source.OwnerChatId,
+                await NotifyAsync(db, source.OwnerChatId,
                     $"⚠️ <b>{Html(source.Name)}</b> in profile <b>{Html(profile.Name)}</b> failed {FailureAlertThreshold} times in a row:\n<code>{Html(source.LastError)}</code>",
-                    ct);
+                    unavailable, ct);
             }
         }
+    }
+
+    /// <summary>
+    /// <see cref="DeliverAsync"/> with the owner's problems contained: whatever goes wrong while talking to
+    /// this one chat, the cycle goes on with the other owners.
+    /// </summary>
+    private async Task<Delivery> DeliverSafelyAsync(
+        AppDb db, long owner, int budget, int? onlySourceId, HashSet<long> unavailable, CancellationToken ct)
+    {
+        try
+        {
+            return await DeliverAsync(db, owner, budget, onlySourceId, ct);
+        }
+        catch (RecipientUnreachableException ex)
+        {
+            await DisableOwnerAsync(db, owner, ex.Message, unavailable, ct);
+            return default;
+        }
+        catch (RateLimitedException)
+        {
+            log.LogWarning("Chat {Owner} is rate limited by Telegram; skipped until the next cycle", owner);
+            unavailable.Add(owner);
+            return default;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            log.LogError(ex, "Delivery for chat {Owner} failed; skipped until the next cycle", owner);
+            unavailable.Add(owner);
+            return default;
+        }
+    }
+
+    /// <summary>
+    /// The chat can't receive messages (the user blocked the bot or deleted the chat). Disable its profiles so
+    /// we stop fetching and trying every hour. The user can re-enable them from the menu if they come back.
+    /// </summary>
+    private async Task DisableOwnerAsync(AppDb db, long owner, string reason, HashSet<long> unavailable, CancellationToken ct)
+    {
+        unavailable.Add(owner);
+
+        var disabled = await db.SearchProfiles
+            .Where(p => p.OwnerChatId == owner && p.Enabled)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Enabled, false), ct);
+
+        log.LogWarning("Chat {Owner} can't be reached ({Reason}); disabled {Count} profile(s)", owner, reason, disabled);
     }
 
     /// <summary>
@@ -333,13 +432,28 @@ public sealed partial class PollRunner(
                 continue;
             }
 
-            await notifier.SendAsync(owner, FormatMessage(job, source.Name, profile), ct);
+            try
+            {
+                await notifier.SendAsync(owner, FormatMessage(job, source.Name, profile), ct);
+            }
+            catch (MessageRejectedException ex)
+            {
+                // Telegram refuses this one message. Retrying every hour can't fix it, and one bad vacancy
+                // must not block the ones behind it, so mark it done (not delivered) and move on.
+                log.LogWarning("Telegram rejected vacancy '{Title}' for {Owner}: {Reason}; skipped", job.Title, owner, ex.Message);
+                job.Processed = true;
+                await db.SaveChangesAsync(ct);
+                continue;
+            }
+
             job.Processed = true;
             job.Delivered = true;
             sent++;
 
             await db.SaveChangesAsync(ct); // save per message so a crash never causes duplicates
-            await Task.Delay(100, ct);
+
+            var gap = options.Value.SendDelayMilliseconds;
+            if (gap > 0) await Task.Delay(gap, ct);
         }
 
         await db.SaveChangesAsync(ct);
@@ -424,10 +538,18 @@ public sealed partial class PollRunner(
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max].TrimEnd() + "…";
 
-    private async Task SafeSendAsync(long chatId, string html, CancellationToken ct)
+    /// <summary>Best-effort message (alerts, limit notices). Never throws; an unreachable chat gets its profiles disabled.</summary>
+    private async Task NotifyAsync(AppDb db, long chatId, string html, HashSet<long> unavailable, CancellationToken ct)
     {
-        try { await notifier.SendAsync(chatId, html, ct); }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        try
+        {
+            await notifier.SendAsync(chatId, html, ct);
+        }
+        catch (RecipientUnreachableException ex)
+        {
+            await DisableOwnerAsync(db, chatId, ex.Message, unavailable, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogWarning(ex, "Failed to send message to {ChatId}", chatId);
         }
@@ -435,13 +557,6 @@ public sealed partial class PollRunner(
 
     private static string Html(string? s) => WebUtility.HtmlEncode(s ?? "");
 
-    private static string ComputeHash(FetchedJob job)
-    {
-        var normalized = NonAlnum().Replace($"{job.Company}{job.Title}".ToLowerInvariant(), "");
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))[..16];
-    }
-
-    [GeneratedRegex(@"[^\p{L}\p{N}]")] private static partial Regex NonAlnum();
     [GeneratedRegex(@"<[^>]+>")] private static partial Regex HtmlTags();
     [GeneratedRegex(@"\s+")] private static partial Regex Whitespace();
 }

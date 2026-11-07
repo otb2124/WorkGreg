@@ -17,7 +17,9 @@ public sealed class PollingWorker(PollRunner runner, IOptions<PollOptions> optio
             {
                 await runner.RunAsync(null, ct);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // Only a real shutdown (ct cancelled) may end the worker. Any other exception, including a
+            // TaskCanceledException caused by an HTTP timeout, is logged and the next cycle still runs.
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 log.LogError(ex, "Poll cycle crashed");
             }
