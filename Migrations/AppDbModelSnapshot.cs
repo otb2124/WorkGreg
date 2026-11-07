@@ -139,9 +139,6 @@ namespace WorkGreg.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
-                    b.Property<bool>("Baselined")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("ConfigJson")
                         .HasColumnType("TEXT");
 
@@ -160,9 +157,6 @@ namespace WorkGreg.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
-                    b.Property<long>("OwnerChatId")
-                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Provider")
                         .HasColumnType("TEXT");
@@ -186,7 +180,7 @@ namespace WorkGreg.Migrations
                     b.ToTable("Sources");
                 });
 
-            modelBuilder.Entity("WorkGreg.Domain.UserProfile", b =>
+            modelBuilder.Entity("WorkGreg.Domain.UserSettings", b =>
                 {
                     b.Property<long>("ChatId")
                         .HasColumnType("INTEGER");
@@ -203,7 +197,27 @@ namespace WorkGreg.Migrations
 
                     b.HasKey("ChatId");
 
-                    b.ToTable("Profiles");
+                    b.ToTable("UserSettings");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.Job", b =>
+                {
+                    b.HasOne("WorkGreg.Domain.Source", null)
+                        .WithMany()
+                        .HasForeignKey("SourceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.Source", b =>
+                {
+                    b.HasOne("WorkGreg.Domain.SearchProfile", "SearchProfile")
+                        .WithMany()
+                        .HasForeignKey("SearchProfileId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SearchProfile");
                 });
 #pragma warning restore 612, 618
         }

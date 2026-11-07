@@ -1,4 +1,4 @@
-﻿using WorkGreg.Data;
+using WorkGreg.Data;
 using WorkGreg.Domain;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,11 +13,11 @@ public sealed class SettingsService(AppDb db)
     private const int LastHour = 23;
 
     /// <summary>The user's settings, or the defaults when nothing was saved yet. Not tracked, not persisted.</summary>
-    public async Task<UserProfile> GetAsync(long chatId, CancellationToken ct) =>
-        await db.Profiles.AsNoTracking().FirstOrDefaultAsync(s => s.ChatId == chatId, ct)
-        ?? new UserProfile { ChatId = chatId };
+    public async Task<UserSettings> GetAsync(long chatId, CancellationToken ct) =>
+        await db.UserSettings.AsNoTracking().FirstOrDefaultAsync(s => s.ChatId == chatId, ct)
+        ?? new UserSettings { ChatId = chatId };
 
-    public async Task<Result<UserProfile, Error>> SetPausedAsync(long chatId, bool paused, CancellationToken ct)
+    public async Task<Result<UserSettings, Error>> SetPausedAsync(long chatId, bool paused, CancellationToken ct)
     {
         var settings = await LoadOrCreateAsync(chatId, ct);
         settings.Paused = paused;
@@ -28,7 +28,7 @@ public sealed class SettingsService(AppDb db)
     /// <summary>
     /// Instant ignores <paramref name="digestHourUtc"/>. Digest needs an hour between 0 and 23 (UTC).
     /// </summary>
-    public async Task<Result<UserProfile, Error>> SetDeliveryAsync(
+    public async Task<Result<UserSettings, Error>> SetDeliveryAsync(
         long chatId, DeliveryMode mode, int? digestHourUtc, CancellationToken ct)
     {
         if (mode == DeliveryMode.Digest && digestHourUtc is null or < 0 or > LastHour)
@@ -42,7 +42,7 @@ public sealed class SettingsService(AppDb db)
     }
 
     /// <summary>Replaces all settings at once (the HTTP API sends the whole form). The hour is clamped to 0-23.</summary>
-    public async Task<Result<UserProfile, Error>> ReplaceAsync(
+    public async Task<Result<UserSettings, Error>> ReplaceAsync(
         long chatId, bool paused, DeliveryMode delivery, int digestHourUtc, CancellationToken ct)
     {
         var settings = await LoadOrCreateAsync(chatId, ct);
@@ -53,13 +53,13 @@ public sealed class SettingsService(AppDb db)
         return settings;
     }
 
-    private async Task<UserProfile> LoadOrCreateAsync(long chatId, CancellationToken ct)
+    private async Task<UserSettings> LoadOrCreateAsync(long chatId, CancellationToken ct)
     {
-        var settings = await db.Profiles.FindAsync(new object[] { chatId }, ct);
+        var settings = await db.UserSettings.FindAsync(new object[] { chatId }, ct);
         if (settings is null)
         {
-            settings = new UserProfile { ChatId = chatId };
-            db.Profiles.Add(settings);
+            settings = new UserSettings { ChatId = chatId };
+            db.UserSettings.Add(settings);
         }
         return settings;
     }

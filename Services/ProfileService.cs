@@ -1,6 +1,5 @@
-﻿using WorkGreg.Data;
+using WorkGreg.Data;
 using WorkGreg.Domain;
-using WorkGreg.Filtering;
 using Microsoft.EntityFrameworkCore;
 
 namespace WorkGreg.Services;
@@ -10,10 +9,10 @@ public sealed record ProfileDraft(
     string Keyword,
     string? Name = null,
     bool Enabled = true,
-    string Include = "",
-    string Exclude = "",
-    string Companies = "",
-    string Locations = "",
+    IReadOnlyList<string>? Include = null,
+    IReadOnlyList<string>? Exclude = null,
+    IReadOnlyList<string>? Companies = null,
+    IReadOnlyList<string>? Locations = null,
     int? MinSalary = null,
     bool RemoteOnly = false);
 
@@ -39,7 +38,7 @@ public sealed class ProfileService(AppDb db)
             .ToListAsync(ct);
 
         var sources = await db.Sources.AsNoTracking()
-            .Where(s => s.OwnerChatId == chatId)
+            .Where(s => s.SearchProfile.OwnerChatId == chatId)
             .OrderBy(s => s.Id)
             .ToListAsync(ct);
 
@@ -100,15 +99,12 @@ public sealed class ProfileService(AppDb db)
         return new ProfileDetails(profile, sources.OrderBy(s => s.Id).ToList());
     }
 
-    /// <summary>Removes the profile with its sources and stored vacancies. Returns the removed profile (for its name).</summary>
+    /// <summary>Removes the profile; the database cascades to its sources and their stored vacancies. Returns the removed profile (for its name).</summary>
     public async Task<Result<SearchProfile, Error>> RemoveAsync(long chatId, int id, CancellationToken ct)
     {
         var profile = await FindOwnedAsync(chatId, id, ct);
         if (profile is null) return ProfileNotFound;
 
-        var sourceIds = await db.Sources.Where(s => s.SearchProfileId == id).Select(s => s.Id).ToListAsync(ct);
-        db.Jobs.RemoveRange(db.Jobs.Where(j => sourceIds.Contains(j.SourceId)));
-        db.Sources.RemoveRange(db.Sources.Where(s => s.SearchProfileId == id));
         db.SearchProfiles.Remove(profile);
         await db.SaveChangesAsync(ct);
 
@@ -148,16 +144,16 @@ public sealed class ProfileService(AppDb db)
     // ---- filters (empty / null clears)
 
     public Task<Result<SearchProfile, Error>> SetIncludeAsync(long chatId, int id, string? csv, CancellationToken ct) =>
-        UpdateAsync(chatId, id, p => p.Include = FilterEngine.Normalize(csv), ct);
+        UpdateAsync(chatId, id, p => p.Include = FilterList.Parse(csv), ct);
 
     public Task<Result<SearchProfile, Error>> SetExcludeAsync(long chatId, int id, string? csv, CancellationToken ct) =>
-        UpdateAsync(chatId, id, p => p.Exclude = FilterEngine.Normalize(csv), ct);
+        UpdateAsync(chatId, id, p => p.Exclude = FilterList.Parse(csv), ct);
 
     public Task<Result<SearchProfile, Error>> SetCompaniesAsync(long chatId, int id, string? csv, CancellationToken ct) =>
-        UpdateAsync(chatId, id, p => p.Companies = FilterEngine.Normalize(csv), ct);
+        UpdateAsync(chatId, id, p => p.Companies = FilterList.Parse(csv), ct);
 
     public Task<Result<SearchProfile, Error>> SetLocationsAsync(long chatId, int id, string? csv, CancellationToken ct) =>
-        UpdateAsync(chatId, id, p => p.Locations = FilterEngine.Normalize(csv), ct);
+        UpdateAsync(chatId, id, p => p.Locations = FilterList.Parse(csv), ct);
 
     /// <summary>Null clears the minimum salary; anything else must be positive.</summary>
     public Task<Result<SearchProfile, Error>> SetMinSalaryAsync(long chatId, int id, int? salary, CancellationToken ct) =>
@@ -204,10 +200,10 @@ public sealed class ProfileService(AppDb db)
         p.Name = name;
         p.Keyword = keyword;
         p.Enabled = draft.Enabled;
-        p.Include = FilterEngine.Normalize(draft.Include);
-        p.Exclude = FilterEngine.Normalize(draft.Exclude);
-        p.Companies = FilterEngine.Normalize(draft.Companies);
-        p.Locations = FilterEngine.Normalize(draft.Locations);
+        p.Include = FilterList.Clean(draft.Include);
+        p.Exclude = FilterList.Clean(draft.Exclude);
+        p.Companies = FilterList.Clean(draft.Companies);
+        p.Locations = FilterList.Clean(draft.Locations);
         p.MinSalary = draft.MinSalary is > 0 ? draft.MinSalary : null;
         p.RemoteOnly = draft.RemoteOnly;
     }

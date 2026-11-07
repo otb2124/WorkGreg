@@ -11,7 +11,6 @@ public sealed record SourceDto(
     string Name,
     string Url,
     bool Enabled,
-    bool Baselined,
     int ConsecutiveFailures,
     string? LastError,
     DateTime? LastSuccessUtc);
@@ -29,10 +28,10 @@ public sealed record ProfileRequest(
     string? Name,
     string Keyword,
     bool Enabled,
-    string Include,
-    string Exclude,
-    string Companies,
-    string Locations,
+    IReadOnlyList<string>? Include,
+    IReadOnlyList<string>? Exclude,
+    IReadOnlyList<string>? Companies,
+    IReadOnlyList<string>? Locations,
     int? MinSalary,
     bool RemoteOnly);
 
@@ -41,10 +40,10 @@ public sealed record ProfileDto(
     string Name,
     string Keyword,
     bool Enabled,
-    string Include,
-    string Exclude,
-    string Companies,
-    string Locations,
+    IReadOnlyList<string> Include,
+    IReadOnlyList<string> Exclude,
+    IReadOnlyList<string> Companies,
+    IReadOnlyList<string> Locations,
     int? MinSalary,
     bool RemoteOnly,
     IReadOnlyList<SourceDto> Sources);
@@ -77,3 +76,4 @@ public sealed record SummaryDto(
     int PendingJobs, int DeliveredJobs, bool Paused);
 
 public sealed record CheckResult(int Sent);
+

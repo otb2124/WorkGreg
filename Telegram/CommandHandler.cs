@@ -140,7 +140,7 @@ public sealed class CommandHandler(
     private static string ProfileCard(ProfileDetails d)
     {
         var (p, list) = d;
-        static string Show(string s, string empty) => s.Length > 0 ? Html(s) : $"<i>{empty}</i>";
+        static string Show(List<string> l, string empty) => l.Count > 0 ? Html(FilterList.Join(l)) : $"<i>{empty}</i>";
 
         var sb = new StringBuilder();
         sb.AppendLine($"<b>{Html(p.Name)}</b> #{p.Id} {(p.Enabled ? "▶️ active" : "⏸ disabled")}");

@@ -118,7 +118,7 @@ public sealed partial class PollRunner(
                 .ToListAsync(runToken);
 
             var max = options.Value.MaxMessagesPerRun;
-            var owners = sources.Select(s => s.OwnerChatId).Distinct().ToList();
+            var owners = sources.Select(s => profiles[s.SearchProfileId].OwnerChatId).Distinct().ToList();
             sentBy = owners.ToDictionary(o => o, _ => 0);
             var waitingBy = owners.ToDictionary(o => o, _ => 0);
             var skippedBy = owners.ToDictionary(o => o, _ => 0);
@@ -140,7 +140,7 @@ public sealed partial class PollRunner(
             {
                 runToken.ThrowIfCancellationRequested();
 
-                var owner = source.OwnerChatId;
+                var owner = profiles[source.SearchProfileId].OwnerChatId;
                 if (unavailable.Contains(owner)) continue;
                 if (sentBy[owner] >= max)
                 {
@@ -276,7 +276,7 @@ public sealed partial class PollRunner(
                 db.Jobs.Add(new Job
                 {
                     SourceId = source.Id,
-                    OwnerChatId = source.OwnerChatId,
+                    OwnerChatId = profile.OwnerChatId,
                     ExternalId = item.ExternalId,
                     Hash = JobHasher.Compute(item.Company, item.Title, hashScope),
                     Title = item.Title,
@@ -293,7 +293,6 @@ public sealed partial class PollRunner(
                 added++;
             }
 
-            source.Baselined = true;
             source.ConsecutiveFailures = 0;
             source.LastError = null;
             source.LastSuccessUtc = now;
@@ -315,7 +314,7 @@ public sealed partial class PollRunner(
             // Usually means the site changed or blocked us. Tell the owner once, not every hour.
             if (source.ConsecutiveFailures == FailureAlertThreshold)
             {
-                await NotifyAsync(db, source.OwnerChatId,
+                await NotifyAsync(db, profile.OwnerChatId,
                     $"⚠️ <b>{Html(source.Name)}</b> in profile <b>{Html(profile.Name)}</b> failed {FailureAlertThreshold} times in a row:\n<code>{Html(source.LastError)}</code>",
                     unavailable, ct);
             }
@@ -376,7 +375,7 @@ public sealed partial class PollRunner(
     {
         if (budget < 0) budget = 0;
 
-        var settings = await db.Profiles.FindAsync(new object[] { owner }, ct) ?? new UserProfile { ChatId = owner };
+        var settings = await db.UserSettings.FindAsync(new object[] { owner }, ct) ?? new UserSettings { ChatId = owner };
         if (settings.Paused) return new Delivery(0, 0, 0, 0);
 
         // Digest mode: only deliver during the configured hour (UTC).
@@ -384,7 +383,7 @@ public sealed partial class PollRunner(
             return new Delivery(0, 0, 0, 0);
 
         var sources = await db.Sources
-            .Where(s => s.OwnerChatId == owner)
+            .Where(s => s.SearchProfile.OwnerChatId == owner)
             .ToDictionaryAsync(s => s.Id, ct);
 
         // Only enabled profiles deliver. Jobs of a disabled profile stay pending until it is enabled again.

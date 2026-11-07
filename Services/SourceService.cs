@@ -1,4 +1,4 @@
-﻿using WorkGreg.Data;
+using WorkGreg.Data;
 using WorkGreg.Domain;
 using WorkGreg.Fetching;
 using Microsoft.EntityFrameworkCore;
@@ -70,7 +70,7 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
         if (profile is null) return ProfileNotFound;
 
         var source = await db.Sources.FirstOrDefaultAsync(
-            s => s.Id == sourceId && s.SearchProfileId == profileId && s.OwnerChatId == chatId, ct);
+            s => s.Id == sourceId && s.SearchProfileId == profileId, ct);
         if (source is null) return SourceNotFound;
 
         return await RemoveCoreAsync(profile, source, ct);
@@ -108,7 +108,7 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
         long chatId, int profileId, int sourceId, bool? enabled, CancellationToken ct)
     {
         var source = await db.Sources.FirstOrDefaultAsync(
-            s => s.Id == sourceId && s.SearchProfileId == profileId && s.OwnerChatId == chatId, ct);
+            s => s.Id == sourceId && s.SearchProfileId == profileId && s.SearchProfile.OwnerChatId == chatId, ct);
         if (source is null) return SourceNotFound;
 
         if (enabled is { } value) source.Enabled = value;
@@ -124,8 +124,7 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
 
     private async Task<Result<SourceChange, Error>> RemoveCoreAsync(SearchProfile profile, Source source, CancellationToken ct)
     {
-        db.Jobs.RemoveRange(db.Jobs.Where(j => j.SourceId == source.Id));
-        db.Sources.Remove(source);
+        db.Sources.Remove(source);   // the database cascades to the source's stored vacancies
         await db.SaveChangesAsync(ct);
 
         return new SourceChange(profile, source, Added: false);

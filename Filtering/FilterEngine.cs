@@ -10,22 +10,22 @@ public static class FilterEngine
     public static bool Matches(Job job, SearchProfile profile)
     {
         // Exclude: title only, so "work with senior engineers" in a description doesn't kill a junior role.
-        if (Split(profile.Exclude).Any(k => Has(job.Title, k)))
+        if (profile.Exclude.Any(k => Has(job.Title, k)))
             return false;
 
         var haystack = $"{job.Title} {job.Company} {job.Location} {job.Description}";
 
-        var include = Split(profile.Include);
+        var include = profile.Include;
         if (include.Count > 0 && !include.Any(k => Has(haystack, k)))
             return false;
 
         // Company filter: match against job.Company specifically, not the whole haystack.
-        var companies = Split(profile.Companies);
+        var companies = profile.Companies;
         if (companies.Count > 0 && !companies.Any(c => Has(job.Company, c)))
             return false;
 
         // Location filter: same idea, match against job.Location only.
-        var locations = Split(profile.Locations);
+        var locations = profile.Locations;
         if (locations.Count > 0 && !locations.Any(l => Has(job.Location, l)))
             return false;
 
@@ -59,17 +59,16 @@ public static class FilterEngine
         if (!string.IsNullOrWhiteSpace(profile.Keyword))
             lines.Add($"Keyword: {profile.Keyword}" + (Has(job.Title, profile.Keyword) ? " (in title)" : ""));
 
-        var include = Split(profile.Include).Where(k => Has(haystack, k)).ToList();
-        if (include.Count > 0) lines.Add($"Include: {string.Join(", ", include)}");
+        var include = profile.Include.Where(k => Has(haystack, k)).ToList();
+        if (include.Count > 0) lines.Add($"Include: {FilterList.Join(include)}");
 
-        var exclude = Split(profile.Exclude);
-        if (exclude.Count > 0) lines.Add($"Exclude: no title match ({string.Join(", ", exclude)})");
+        if (profile.Exclude.Count > 0) lines.Add($"Exclude: no title match ({FilterList.Join(profile.Exclude)})");
 
-        var companies = Split(profile.Companies).Where(c => Has(job.Company, c)).ToList();
-        if (companies.Count > 0) lines.Add($"Company: {string.Join(", ", companies)}");
+        var companies = profile.Companies.Where(c => Has(job.Company, c)).ToList();
+        if (companies.Count > 0) lines.Add($"Company: {FilterList.Join(companies)}");
 
-        var locations = Split(profile.Locations).Where(l => Has(job.Location, l)).ToList();
-        if (locations.Count > 0) lines.Add($"Location: {string.Join(", ", locations)}");
+        var locations = profile.Locations.Where(l => Has(job.Location, l)).ToList();
+        if (locations.Count > 0) lines.Add($"Location: {FilterList.Join(locations)}");
 
         if (profile.RemoteOnly)
         {
@@ -82,14 +81,6 @@ public static class FilterEngine
 
         return lines;
     }
-
-    public static List<string> Split(string? csv) =>
-        (csv ?? "")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-    public static string Normalize(string? csv) => string.Join(", ", Split(csv));
 
     private static bool Has(string? text, string keyword) =>
         text?.Contains(keyword, StringComparison.OrdinalIgnoreCase) == true;

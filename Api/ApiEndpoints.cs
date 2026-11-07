@@ -127,7 +127,7 @@ public static class ApiEndpoints
         new(r.Keyword, r.Name, r.Enabled, r.Include, r.Exclude, r.Companies, r.Locations, r.MinSalary, r.RemoteOnly);
 
     private static SourceDto ToDto(Source s) =>
-        new(s.Id, s.SearchProfileId, s.Type, s.Provider, s.Name, s.Url, s.Enabled, s.Baselined,
+        new(s.Id, s.SearchProfileId, s.Type, s.Provider, s.Name, s.Url, s.Enabled,
             s.ConsecutiveFailures, s.LastError, s.LastSuccessUtc);
 
     private static ProfileDto ToDto(ProfileDetails d) =>
@@ -135,5 +135,5 @@ public static class ApiEndpoints
             d.Profile.Include, d.Profile.Exclude, d.Profile.Companies, d.Profile.Locations,
             d.Profile.MinSalary, d.Profile.RemoteOnly, d.Sources.Select(s => ToDto(s)).ToList());
 
-    private static SettingsDto ToDto(UserProfile s) => new(s.Paused, s.Delivery, s.DigestHourUtc);
+    private static SettingsDto ToDto(UserSettings s) => new(s.Paused, s.Delivery, s.DigestHourUtc);
 }

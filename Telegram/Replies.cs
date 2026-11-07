@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using WorkGreg.Domain;
 using WorkGreg.Services;
 
@@ -61,16 +61,16 @@ internal static class Replies
     // ---- filters
 
     public static string IncludeSet(SearchProfile p) =>
-        p.Include.Length > 0 ? $"Include: {Html(p.Include)}" : "Include filter cleared.";
+        p.Include.Count > 0 ? $"Include: {Html(FilterList.Join(p.Include))}" : "Include filter cleared.";
 
     public static string ExcludeSet(SearchProfile p) =>
-        p.Exclude.Length > 0 ? $"Exclude: {Html(p.Exclude)}" : "Exclude filter cleared.";
+        p.Exclude.Count > 0 ? $"Exclude: {Html(FilterList.Join(p.Exclude))}" : "Exclude filter cleared.";
 
     public static string CompaniesSet(SearchProfile p) =>
-        p.Companies.Length > 0 ? $"Companies: {Html(p.Companies)}" : "Companies filter cleared.";
+        p.Companies.Count > 0 ? $"Companies: {Html(FilterList.Join(p.Companies))}" : "Companies filter cleared.";
 
     public static string LocationsSet(SearchProfile p) =>
-        p.Locations.Length > 0 ? $"Locations: {Html(p.Locations)}" : "Locations filter cleared.";
+        p.Locations.Count > 0 ? $"Locations: {Html(FilterList.Join(p.Locations))}" : "Locations filter cleared.";
 
     public static string SalarySet(SearchProfile p) =>
         p.MinSalary is { } salary
@@ -81,10 +81,10 @@ internal static class Replies
 
     // ---- settings and control
 
-    public static string Paused(UserProfile s) =>
+    public static string Paused(UserSettings s) =>
         s.Paused ? "⏸ Paused. New vacancies will wait until /resume." : "▶️ Resumed.";
 
-    public static string Delivery(UserProfile s) =>
+    public static string Delivery(UserSettings s) =>
         s.Delivery == DeliveryMode.Instant
             ? "Delivery: instant (every poll)."
             : $"Delivery: daily digest at {s.DigestHourUtc:00}:00 UTC.";

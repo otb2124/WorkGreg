@@ -487,7 +487,7 @@ public sealed class MenuHandler(
 
         var p = d.Profile;
 
-        string Show(string s, string empty) => s.Length > 0 ? Html(Short(s)) : $"<i>{empty}</i>";
+        string Show(List<string> l, string empty) => l.Count > 0 ? Html(Short(FilterList.Join(l))) : $"<i>{empty}</i>";
 
         var sb = new StringBuilder();
         AppendNotice(sb, notice);
@@ -615,22 +615,22 @@ public sealed class MenuHandler(
                 $"Send a new name (up to {ProfileRules.MaxNameLength} characters).",
                 profileBack, false),
 
-            "inc" => new("🔤 Include keywords", p.Include,
+            "inc" => new("🔤 Include keywords", FilterList.Join(p.Include),
                 "Send keywords separated by commas, e.g. <code>.NET, C#, Angular</code>.\n" +
                 "A vacancy matches if <b>any</b> keyword appears in its title, company, location or description.\n" +
                 "Tip: titles are often hyphenated, so add <code>full-stack</code> next to <code>full stack</code>.",
                 filtersBack, true),
 
-            "exc" => new("🚫 Exclude keywords", p.Exclude,
+            "exc" => new("🚫 Exclude keywords", FilterList.Join(p.Exclude),
                 "Vacancies whose <b>title</b> contains any of these are skipped, e.g. <code>senior, lead, principal</code>.",
                 filtersBack, true),
 
-            "com" => new("🏢 Companies", p.Companies,
+            "com" => new("🏢 Companies", FilterList.Join(p.Companies),
                 "Only vacancies from these companies, separated by commas.\n" +
                 "⚠️ RSS feeds usually don't expose a company, so this can hide everything coming from feed sources.",
                 filtersBack, true),
 
-            "loc" => new("📍 Locations", p.Locations,
+            "loc" => new("📍 Locations", FilterList.Join(p.Locations),
                 "Only vacancies in these locations, separated by commas, e.g. <code>Zagreb, Europe</code>.\n" +
                 "⚠️ RSS feeds usually don't expose a location, so this can hide everything coming from feed sources.",
                 filtersBack, true),
@@ -683,11 +683,11 @@ public sealed class MenuHandler(
     private static int ActiveFilterCount(SearchProfile p) =>
         new[]
         {
-            p.Include.Length > 0, p.Exclude.Length > 0, p.Companies.Length > 0,
-            p.Locations.Length > 0, p.MinSalary is not null, p.RemoteOnly
+            p.Include.Count > 0, p.Exclude.Count > 0, p.Companies.Count > 0,
+            p.Locations.Count > 0, p.MinSalary is not null, p.RemoteOnly
         }.Count(x => x);
 
-    private static string DeliveryText(UserProfile p) =>
+    private static string DeliveryText(UserSettings p) =>
         p.Delivery == DeliveryMode.Instant ? "⚡ instant" : $"🗓 daily digest at {p.DigestHourUtc:00}:00 UTC";
 
     private static void AppendNotice(StringBuilder sb, string? notice)

@@ -1,4 +1,4 @@
-﻿using WorkGreg.Data;
+using WorkGreg.Data;
 using WorkGreg.Domain;
 using Microsoft.EntityFrameworkCore;
 
@@ -39,7 +39,7 @@ public sealed class JobService(AppDb db, PollRunner runner)
         if (q.ProfileId is { } profileId)
         {
             var ids = await db.Sources
-                .Where(s => s.OwnerChatId == chatId && s.SearchProfileId == profileId)
+                .Where(s => s.SearchProfile.OwnerChatId == chatId && s.SearchProfileId == profileId)
                 .Select(s => s.Id)
                 .ToListAsync(ct);
             query = query.Where(j => ids.Contains(j.SourceId));
@@ -62,7 +62,7 @@ public sealed class JobService(AppDb db, PollRunner runner)
             .ToListAsync(ct);
 
         var sources = await db.Sources.AsNoTracking()
-            .Where(s => s.OwnerChatId == chatId)
+            .Where(s => s.SearchProfile.OwnerChatId == chatId)
             .ToDictionaryAsync(s => s.Id, ct);
         var profileNames = await db.SearchProfiles.AsNoTracking()
             .Where(p => p.OwnerChatId == chatId)
@@ -81,10 +81,10 @@ public sealed class JobService(AppDb db, PollRunner runner)
     public async Task<UserSummary> GetSummaryAsync(long chatId, CancellationToken ct)
     {
         var profiles = await db.SearchProfiles.AsNoTracking().Where(p => p.OwnerChatId == chatId).ToListAsync(ct);
-        var sources = await db.Sources.AsNoTracking().Where(s => s.OwnerChatId == chatId).ToListAsync(ct);
+        var sources = await db.Sources.AsNoTracking().Where(s => s.SearchProfile.OwnerChatId == chatId).ToListAsync(ct);
         var pending = await db.Jobs.CountAsync(j => j.OwnerChatId == chatId && !j.Processed, ct);
         var delivered = await db.Jobs.CountAsync(j => j.OwnerChatId == chatId && j.Delivered, ct);
-        var paused = await db.Profiles.AsNoTracking()
+        var paused = await db.UserSettings.AsNoTracking()
             .Where(s => s.ChatId == chatId)
             .Select(s => s.Paused)
             .FirstOrDefaultAsync(ct);

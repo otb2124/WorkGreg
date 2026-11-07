@@ -19,7 +19,6 @@ public static class ProfileRules
 
     public static Source NewSource(SearchProfile profile, SourceProvider provider) => new()
     {
-        OwnerChatId = profile.OwnerChatId,
         SearchProfileId = profile.Id,
         Type = provider.Type,
         Provider = provider.Id,
@@ -40,3 +39,4 @@ public static class ProfileRules
         }
     }
 }
+

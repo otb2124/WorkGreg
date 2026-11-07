@@ -16,10 +16,13 @@ public enum FetchType
 public class Source
 {
     public int Id { get; set; }
-    public long OwnerChatId { get; set; }
 
-    /// <summary>The profile this source belongs to. A site used by two profiles is two Source rows.</summary>
+    /// <summary>
+    /// The profile this source belongs to (real foreign key, cascade delete). A site used by two profiles is two Source rows.
+    /// The owner of a source is <c>SearchProfile.OwnerChatId</c>; it is not stored twice.
+    /// </summary>
     public int SearchProfileId { get; set; }
+    public SearchProfile SearchProfile { get; set; } = null!;
 
     /// <summary>Display name, the provider's name (e.g. "Remotive").</summary>
     public string Name { get; set; } = "";
@@ -36,9 +39,6 @@ public class Source
 
     public bool Enabled { get; set; } = true;
 
-    /// <summary>False until the first successful fetch.</summary>
-    public bool Baselined { get; set; }
-
     public int ConsecutiveFailures { get; set; }
     public string? LastError { get; set; }
     public DateTime? LastSuccessUtc { get; set; }
@@ -47,7 +47,14 @@ public class Source
 public class Job
 {
     public int Id { get; set; }
+
+    /// <summary>Real foreign key to <see cref="Source"/> (cascade delete).</summary>
     public int SourceId { get; set; }
+
+    /// <summary>
+    /// Deliberate denormalization: the owner of the source's profile, copied once when the job is stored (PollRunner).
+    /// It keeps the per-user queries and the duplicate check (OwnerChatId + Hash) free of joins.
+    /// </summary>
     public long OwnerChatId { get; set; }
     public string ExternalId { get; set; } = "";
 
@@ -86,12 +93,14 @@ public class SearchProfile
     /// <summary>The search keyword used by every source of this profile. Also enforced locally on every fetched job.</summary>
     public string Keyword { get; set; } = "";
 
-    public string Include { get; set; } = "";
-    public string Exclude { get; set; } = "";
-    /// <summary>Only deliver jobs whose Company is in this comma list (empty = any).</summary>
-    public string Companies { get; set; } = "";
-    /// <summary>Only deliver jobs whose Location is in this comma list (empty = any).</summary>
-    public string Locations { get; set; } = "";
+    /// <summary>A job matches if ANY of these appears in its title, company, location or description (empty = anything).</summary>
+    public List<string> Include { get; set; } = [];
+    /// <summary>Jobs whose title contains any of these are skipped (empty = nothing excluded).</summary>
+    public List<string> Exclude { get; set; } = [];
+    /// <summary>Only deliver jobs whose Company matches one of these (empty = any).</summary>
+    public List<string> Companies { get; set; } = [];
+    /// <summary>Only deliver jobs whose Location matches one of these (empty = any).</summary>
+    public List<string> Locations { get; set; } = [];
     /// <summary>Min salary if the fetcher exposes it (null = no constraint).</summary>
     public int? MinSalary { get; set; }
     public bool RemoteOnly { get; set; }
@@ -100,8 +109,8 @@ public class SearchProfile
     public bool Enabled { get; set; } = true;
 }
 
-/// <summary>Per-user settings that apply to all profiles (the filters moved to <see cref="SearchProfile"/>).</summary>
-public class UserProfile
+/// <summary>Per-user settings that apply to all profiles (the filters live on <see cref="SearchProfile"/>).</summary>
+public class UserSettings
 {
     public long ChatId { get; set; }
     public bool Paused { get; set; }
@@ -112,3 +121,4 @@ public class UserProfile
 }
 
 public enum DeliveryMode { Instant = 0, Digest = 1 }
+
