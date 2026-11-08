@@ -9,6 +9,8 @@ using WorkGreg.Fetching;
 using WorkGreg.Services;
 using WorkGreg.Telegram;
 using WorkGreg.Telegram.Menu;
+using Microsoft.Extensions.Http.Resilience;
+using Polly;
 
 namespace WorkGreg.Composition;
 
@@ -53,11 +55,26 @@ public static class ServiceCollectionExtensions
     {
         services.AddHttpClient("fetch", c =>
         {
-            c.Timeout = TimeSpan.FromSeconds(30);
+            // No fixed HttpClient.Timeout: it would cut retries short. The resilience handler below owns all timeouts.
+            c.Timeout = Timeout.InfiniteTimeSpan;
             c.DefaultRequestHeaders.UserAgent.ParseAdd("WorkGreg/1.0 (personal job alerts)");
-        });
+        })
+            // Retries transient failures (HTTP 5xx, 408, 429, network errors, attempt timeouts) with exponential backoff
+            // and jitter, so a one-off 503 never reaches SourceSyncService and never counts toward the 3-failure alert.
+            // Only a request that still fails after every retry counts as one failure.
+            .AddStandardResilienceHandler(o =>
+            {
+                o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(15);          // one try
+                o.Retry.MaxRetryAttempts = 3;                                 // 1 try + 3 retries
+                o.Retry.Delay = TimeSpan.FromSeconds(2);                      // 2s, 4s, 8s (+ jitter)
+                o.Retry.BackoffType = DelayBackoffType.Exponential;
+                o.Retry.UseJitter = true;
+                o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(100);    // must exceed 4 x 15s + the backoff
+                o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(30); // must be >= 2 x AttemptTimeout
+            });
 
         services.AddSingleton<HostThrottle>();
+        services.AddSingleton<FeedCache>();
         services.AddSingleton<IJobFetcher, FeedFetcher>();
         services.AddSingleton<IJobFetcher, ApiFetcher>();
         services.AddSingleton<IJobFetcher, HtmlFetcher>();
