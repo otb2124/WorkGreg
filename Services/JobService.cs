@@ -13,7 +13,16 @@ public sealed record JobQuery(
     int Skip = 0,
     int Take = 50);
 
-public sealed record JobListItem(Job Job, int ProfileId, string ProfileName, string SourceName);
+/// <summary>
+/// One of a user's vacancies as the API and the UI see it: the shared <see cref="Job"/> data plus this user's
+/// <see cref="JobDelivery"/> state. <paramref name="Id"/> is the delivery's id, so it is unique per list row even when
+/// two of the user's profiles found the same vacancy.
+/// </summary>
+public sealed record JobView(
+    int Id, int SourceId, string Title, string? Company, string? Location, string Url, string? Description,
+    DateTime? PostedUtc, DateTime FirstSeenUtc, bool Processed, bool Delivered);
+
+public sealed record JobListItem(JobView Job, int ProfileId, string ProfileName, string SourceName);
 
 public sealed record JobPage(int Total, IReadOnlyList<JobListItem> Items);
 
@@ -34,7 +43,7 @@ public sealed class JobService(AppDb db, PollRunner runner)
         var skip = Math.Max(q.Skip, 0);
         var take = Math.Clamp(q.Take, 1, MaxPageSize);
 
-        var query = db.Jobs.AsNoTracking().Where(j => j.OwnerChatId == chatId);
+        var query = db.JobDeliveries.AsNoTracking().Where(d => d.OwnerChatId == chatId);
 
         if (q.ProfileId is { } profileId)
         {
@@ -42,21 +51,22 @@ public sealed class JobService(AppDb db, PollRunner runner)
                 .Where(s => s.SearchProfile.OwnerChatId == chatId && s.SearchProfileId == profileId)
                 .Select(s => s.Id)
                 .ToListAsync(ct);
-            query = query.Where(j => ids.Contains(j.SourceId));
+            query = query.Where(d => ids.Contains(d.SourceId));
         }
 
-        if (q.SourceId is { } sourceId) query = query.Where(j => j.SourceId == sourceId);
-        if (q.Delivered is { } delivered) query = query.Where(j => j.Delivered == delivered);
+        if (q.SourceId is { } sourceId) query = query.Where(d => d.SourceId == sourceId);
+        if (q.Delivered is { } delivered) query = query.Where(d => d.Delivered == delivered);
 
         if (!string.IsNullOrWhiteSpace(q.Search))
         {
             var term = q.Search.Trim();
-            query = query.Where(j => j.Title.Contains(term) || (j.Company != null && j.Company.Contains(term)));
+            query = query.Where(d => d.Job.Title.Contains(term) || (d.Job.Company != null && d.Job.Company.Contains(term)));
         }
 
         var total = await query.CountAsync(ct);
-        var jobs = await query
-            .OrderByDescending(j => j.PostedUtc ?? j.FirstSeenUtc)
+        var rows = await query
+            .Include(d => d.Job)
+            .OrderByDescending(d => d.Job.PostedUtc ?? d.CreatedUtc)
             .Skip(skip)
             .Take(take)
             .ToListAsync(ct);
@@ -68,11 +78,17 @@ public sealed class JobService(AppDb db, PollRunner runner)
             .Where(p => p.OwnerChatId == chatId)
             .ToDictionaryAsync(p => p.Id, p => p.Name, ct);
 
-        var items = jobs.Select(j =>
+        var items = rows.Select(d =>
         {
-            sources.TryGetValue(j.SourceId, out var source);
+            sources.TryGetValue(d.SourceId, out var source);
             var profileOfJob = source?.SearchProfileId ?? 0;
-            return new JobListItem(j, profileOfJob, profileNames.GetValueOrDefault(profileOfJob, "?"), source?.Name ?? "?");
+            var job = d.Job;
+
+            var view = new JobView(
+                d.Id, d.SourceId, job.Title, job.Company, job.Location, job.Url, job.Description,
+                job.PostedUtc, d.CreatedUtc, d.Processed, d.Delivered);
+
+            return new JobListItem(view, profileOfJob, profileNames.GetValueOrDefault(profileOfJob, "?"), source?.Name ?? "?");
         }).ToList();
 
         return new JobPage(total, items);
@@ -82,8 +98,8 @@ public sealed class JobService(AppDb db, PollRunner runner)
     {
         var profiles = await db.SearchProfiles.AsNoTracking().Where(p => p.OwnerChatId == chatId).ToListAsync(ct);
         var sources = await db.Sources.AsNoTracking().Where(s => s.SearchProfile.OwnerChatId == chatId).ToListAsync(ct);
-        var pending = await db.Jobs.CountAsync(j => j.OwnerChatId == chatId && !j.Processed, ct);
-        var delivered = await db.Jobs.CountAsync(j => j.OwnerChatId == chatId && j.Delivered, ct);
+        var pending = await db.JobDeliveries.CountAsync(d => d.OwnerChatId == chatId && !d.Processed, ct);
+        var delivered = await db.JobDeliveries.CountAsync(d => d.OwnerChatId == chatId && d.Delivered, ct);
         var paused = await db.UserSettings.AsNoTracking()
             .Where(s => s.ChatId == chatId)
             .Select(s => s.Paused)
@@ -100,19 +116,20 @@ public sealed class JobService(AppDb db, PollRunner runner)
             paused);
     }
 
+    /// <summary>How many vacancies are stored for this user (their deliveries; the shared jobs behind them are not theirs to count).</summary>
     public Task<int> CountStoredAsync(long chatId, CancellationToken ct) =>
-        db.Jobs.CountAsync(j => j.OwnerChatId == chatId, ct);
+        db.JobDeliveries.CountAsync(d => d.OwnerChatId == chatId, ct);
 
-    /// <summary>Marks every stored vacancy as not yet sent. Returns how many were reset.</summary>
+    /// <summary>Marks every stored vacancy of this user as not yet sent. Returns how many were reset. Other users' state is untouched.</summary>
     public async Task<Result<int, Error>> ResendAllAsync(long chatId, CancellationToken ct)
     {
         // Delivered must be cleared too: delivery treats "same Hash already Delivered"
         // as a duplicate, so every job would skip itself.
-        return await db.Jobs
-            .Where(j => j.OwnerChatId == chatId)
+        return await db.JobDeliveries
+            .Where(d => d.OwnerChatId == chatId)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(j => j.Processed, false)
-                .SetProperty(j => j.Delivered, false), ct);
+                .SetProperty(d => d.Processed, false)
+                .SetProperty(d => d.Delivered, false), ct);
     }
 
     /// <summary>

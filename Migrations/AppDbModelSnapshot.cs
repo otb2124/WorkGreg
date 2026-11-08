@@ -26,9 +26,6 @@ namespace WorkGreg.Migrations
                     b.Property<string>("Company")
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("Delivered")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("Description")
                         .HasColumnType("TEXT");
 
@@ -49,19 +46,14 @@ namespace WorkGreg.Migrations
                     b.Property<string>("Location")
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("OwnerChatId")
-                        .HasColumnType("INTEGER");
-
                     b.Property<DateTime?>("PostedUtc")
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("Processed")
-                        .HasColumnType("INTEGER");
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
 
                     b.Property<int?>("Salary")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("SourceId")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("Title")
@@ -74,14 +66,48 @@ namespace WorkGreg.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("OwnerChatId", "Hash");
+                    b.HasIndex("Hash");
 
-                    b.HasIndex("OwnerChatId", "Processed");
-
-                    b.HasIndex("SourceId", "ExternalId")
+                    b.HasIndex("Provider", "ExternalId")
                         .IsUnique();
 
                     b.ToTable("Jobs");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.JobDelivery", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Delivered")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("JobId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("OwnerChatId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Processed")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SourceId")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("JobId");
+
+                    b.HasIndex("OwnerChatId", "Processed");
+
+                    b.HasIndex("SourceId", "JobId")
+                        .IsUnique();
+
+                    b.ToTable("JobDeliveries");
                 });
 
             modelBuilder.Entity("WorkGreg.Domain.SearchProfile", b =>
@@ -203,13 +229,21 @@ namespace WorkGreg.Migrations
                     b.ToTable("UserSettings");
                 });
 
-            modelBuilder.Entity("WorkGreg.Domain.Job", b =>
+            modelBuilder.Entity("WorkGreg.Domain.JobDelivery", b =>
                 {
+                    b.HasOne("WorkGreg.Domain.Job", "Job")
+                        .WithMany()
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
                     b.HasOne("WorkGreg.Domain.Source", null)
                         .WithMany()
                         .HasForeignKey("SourceId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("Job");
                 });
 
             modelBuilder.Entity("WorkGreg.Domain.Source", b =>

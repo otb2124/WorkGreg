@@ -10,7 +10,8 @@ namespace WorkGreg.Services;
 public readonly record struct DeliveryResult(int Sent, int Waiting, int Filtered, int Duplicates, bool Digest = false);
 
 /// <summary>
-/// Sends one owner's pending vacancies. Instant mode: one message per vacancy, up to the budget, saved per message so a
+/// Delivery side of the cycle: sends one owner's pending vacancies. It reads and writes only that owner's
+/// <see cref="JobDelivery"/> rows (the shared <see cref="Job"/> is never modified here). Instant mode: one message per vacancy, up to the budget, saved per message so a
 /// crash never causes duplicates. Digest mode: ONE message per day (see <see cref="DigestSchedule"/>) listing what
 /// matches, sent in the final pass of a cycle after every source was fetched.
 /// </summary>
@@ -85,22 +86,23 @@ public sealed class DeliveryService(
         var filteredOut = 0;
         var duplicates = 0;
 
-        foreach (var job in pending.Jobs)
+        foreach (var delivery in pending.Deliveries)
         {
-            var source = pending.Sources[job.SourceId];
+            var job = delivery.Job;
+            var source = pending.Sources[delivery.SourceId];
             var profile = pending.Profiles[source.SearchProfileId];
             var criteria = pending.Criteria[profile.Id];
 
             if (!criteria.Matches(job))
             {
-                job.Processed = true;
+                delivery.Processed = true;
                 filteredOut++;
                 continue;
             }
 
             if (await AlreadyDeliveredAsync(db, owner, job.Hash, ct))
             {
-                job.Processed = true;
+                delivery.Processed = true;
                 duplicates++;
                 continue;
             }
@@ -123,13 +125,13 @@ public sealed class DeliveryService(
                 // Telegram refuses this one message. Retrying every hour can't fix it, and one bad vacancy
                 // must not block the ones behind it, so mark it done (not delivered) and move on.
                 log.LogWarning("Telegram rejected vacancy '{Title}' for {Owner}: {Reason}; skipped", job.Title, owner, ex.Message);
-                job.Processed = true;
+                delivery.Processed = true;
                 await db.SaveChangesAsync(ct);
                 continue;
             }
 
-            job.Processed = true;
-            job.Delivered = true;
+            delivery.Processed = true;
+            delivery.Delivered = true;
             sent++;
 
             await db.SaveChangesAsync(ct); // save per message so a crash never causes duplicates
@@ -140,10 +142,10 @@ public sealed class DeliveryService(
 
         await db.SaveChangesAsync(ct);
 
-        if (pending.Jobs.Count > 0)
+        if (pending.Deliveries.Count > 0)
             log.LogInformation(
                 "Delivery for {Owner}: {Pending} pending, {Sent} sent, {Filtered} dropped by the profile's filters (Include/Exclude/Companies/Locations/Salary/Remote), {Duplicates} duplicates, {Waiting} waiting for the limit",
-                owner, pending.Jobs.Count, sent, filteredOut, duplicates, waiting);
+                owner, pending.Deliveries.Count, sent, filteredOut, duplicates, waiting);
 
         return new DeliveryResult(sent, waiting, filteredOut, duplicates);
     }
@@ -160,19 +162,20 @@ public sealed class DeliveryService(
     {
         var pending = await LoadPendingAsync(db, owner, null, ct);
 
-        var candidates = new List<(Job Job, DigestItem Item)>();
+        var candidates = new List<(JobDelivery Delivery, DigestItem Item)>();
         var hashesInDigest = new HashSet<string>();
         var filteredOut = 0;
         var duplicates = 0;
 
-        foreach (var job in pending.Jobs)
+        foreach (var delivery in pending.Deliveries)
         {
-            var source = pending.Sources[job.SourceId];
+            var job = delivery.Job;
+            var source = pending.Sources[delivery.SourceId];
             var profile = pending.Profiles[source.SearchProfileId];
 
             if (!pending.Criteria[profile.Id].Matches(job))
             {
-                job.Processed = true;
+                delivery.Processed = true;
                 filteredOut++;
                 continue;
             }
@@ -181,12 +184,12 @@ public sealed class DeliveryService(
             // (two boards, two profiles) has to be caught here as well as in the database.
             if (await AlreadyDeliveredAsync(db, owner, job.Hash, ct) || !hashesInDigest.Add(job.Hash))
             {
-                job.Processed = true;
+                delivery.Processed = true;
                 duplicates++;
                 continue;
             }
 
-            candidates.Add((job, new DigestItem(job, source.Name, profile.Name)));
+            candidates.Add((delivery, new DigestItem(job, source.Name, profile.Name)));
         }
 
         if (candidates.Count == 0)
@@ -196,7 +199,7 @@ public sealed class DeliveryService(
         }
 
         var page = MessageFormatter.Digest(candidates.Select(c => c.Item).ToList(), options.Value.DigestMaxItems);
-        var included = candidates.Take(page.Included).Select(c => c.Job).ToList();
+        var included = candidates.Take(page.Included).Select(c => c.Delivery).ToList();
 
         try
         {
@@ -208,15 +211,15 @@ public sealed class DeliveryService(
             // the digest stays due for whatever is left.
             log.LogWarning("Telegram rejected the digest for {Owner}: {Reason}; its {Count} vacancies are skipped",
                 owner, ex.Message, included.Count);
-            foreach (var job in included) job.Processed = true;
+            foreach (var delivery in included) delivery.Processed = true;
             await db.SaveChangesAsync(ct);
             return new DeliveryResult(0, candidates.Count - included.Count, filteredOut, duplicates, Digest: true);
         }
 
-        foreach (var job in included)
+        foreach (var delivery in included)
         {
-            job.Processed = true;
-            job.Delivered = true;
+            delivery.Processed = true;
+            delivery.Delivered = true;
         }
         settings.LastDigestSentUtc = now;
         await db.SaveChangesAsync(ct); // vacancies and the digest time in one save: a crash can't split them
@@ -235,32 +238,37 @@ public sealed class DeliveryService(
         IReadOnlyDictionary<int, Source> Sources,
         IReadOnlyDictionary<int, SearchProfile> Profiles,
         IReadOnlyDictionary<int, ProfileCriteria> Criteria,
-        List<Job> Jobs);
+        List<JobDelivery> Deliveries);
 
-    /// <summary>The owner's unprocessed vacancies (of one source, or all), newest first, for enabled profiles only.</summary>
+    /// <summary>
+    /// The owner's unprocessed deliveries (of one source, or all) with their vacancies, newest first, for enabled profiles only.
+    /// "Newest" is the posting date, or when this owner's source first stored it for undated postings.
+    /// </summary>
     private static async Task<PendingJobs> LoadPendingAsync(AppDb db, long owner, int? onlySourceId, CancellationToken ct)
     {
         var sources = await db.Sources
             .Where(s => s.SearchProfile.OwnerChatId == owner)
             .ToDictionaryAsync(s => s.Id, ct);
 
-        // Only enabled profiles deliver. Jobs of a disabled profile stay pending until it is enabled again.
+        // Only enabled profiles deliver. Deliveries of a disabled profile stay pending until it is enabled again.
         var profiles = await db.SearchProfiles
             .Where(p => p.OwnerChatId == owner && p.Enabled)
             .ToDictionaryAsync(p => p.Id, ct);
 
         var criteria = profiles.ToDictionary(p => p.Key, p => ProfileCriteria.For(p.Value));
 
-        var jobs = (await db.Jobs
-                .Where(j => j.OwnerChatId == owner && !j.Processed && (onlySourceId == null || j.SourceId == onlySourceId))
-                .OrderByDescending(j => j.PostedUtc ?? j.FirstSeenUtc)
+        var deliveries = (await db.JobDeliveries
+                .Include(d => d.Job)
+                .Where(d => d.OwnerChatId == owner && !d.Processed && (onlySourceId == null || d.SourceId == onlySourceId))
+                .OrderByDescending(d => d.Job.PostedUtc ?? d.CreatedUtc)
                 .ToListAsync(ct))
-            .Where(j => sources.TryGetValue(j.SourceId, out var s) && profiles.ContainsKey(s.SearchProfileId))
+            .Where(d => sources.TryGetValue(d.SourceId, out var s) && profiles.ContainsKey(s.SearchProfileId))
             .ToList();
 
-        return new PendingJobs(sources, profiles, criteria, jobs);
+        return new PendingJobs(sources, profiles, criteria, deliveries);
     }
 
+    /// <summary>Was a vacancy with this hash (same company + title, on any board or profile) already sent to this owner?</summary>
     private static Task<bool> AlreadyDeliveredAsync(AppDb db, long owner, string hash, CancellationToken ct) =>
-        db.Jobs.AnyAsync(j => j.OwnerChatId == owner && j.Hash == hash && j.Delivered, ct);
+        db.JobDeliveries.AnyAsync(d => d.OwnerChatId == owner && d.Delivered && d.Job.Hash == hash, ct);
 }

@@ -44,18 +44,20 @@ public class Source
     public DateTime? LastSuccessUtc { get; set; }
 }
 
+/// <summary>
+/// A vacancy exactly as a provider published it. Stored ONCE per (<see cref="Provider"/>, <see cref="ExternalId"/>), however many
+/// users, profiles or keyword searches found it. Nothing here is about a user: who was told about it, and whether,
+/// lives in <see cref="JobDelivery"/>.
+/// </summary>
 public class Job
 {
     public int Id { get; set; }
 
-    /// <summary>Real foreign key to <see cref="Source"/> (cascade delete).</summary>
-    public int SourceId { get; set; }
-
     /// <summary>
-    /// Deliberate denormalization: the owner of the source's profile, copied once when the job is stored (PollRunner).
-    /// It keeps the per-user queries and the duplicate check (OwnerChatId + Hash) free of joins.
+    /// Catalog id of the provider that published it (e.g. "remotive"); "source{Id}" for legacy rows added with a raw URL
+    /// (the same scope <see cref="JobHasher"/> uses). Together with <see cref="ExternalId"/> this is the identity of a vacancy.
     /// </summary>
-    public long OwnerChatId { get; set; }
+    public string Provider { get; set; } = "";
     public string ExternalId { get; set; } = "";
 
     /// <summary>Normalized company+title hash, used to skip the same vacancy appearing on several boards (or in several profiles).</summary>
@@ -67,9 +69,37 @@ public class Job
     public string Url { get; set; } = "";
     public string? Description { get; set; }
     public DateTime? PostedUtc { get; set; }
+
+    /// <summary>When ANY source first stored this vacancy. Per-user "first seen" is <see cref="JobDelivery.CreatedUtc"/>.</summary>
     public DateTime FirstSeenUtc { get; set; }
     public int? Salary { get; set; }            // in Job, for MinSalary filter
     public string? EmploymentType { get; set; } // full-time / contract
+}
+
+/// <summary>
+/// One user's state for one stored vacancy, as found through one source (so through one profile). This is the per-user half
+/// of the ingest/delivery split: <see cref="Job"/> is shared and immutable, this row says whether the filters were
+/// evaluated and whether a Telegram message was sent.
+/// Deleting the job or the source deletes the delivery (cascade); deleting a delivery never touches the job.
+/// </summary>
+public class JobDelivery
+{
+    public int Id { get; set; }
+
+    public int JobId { get; set; }
+    public Job Job { get; set; } = null!;
+
+    /// <summary>The source that found the job. Its profile decides the filters, its profile's owner is who receives it.</summary>
+    public int SourceId { get; set; }
+
+    /// <summary>
+    /// Deliberate denormalization: the owner of the source's profile, copied once when the delivery is created
+    /// (SourceSyncService). It keeps the per-user queries and the duplicate check free of joins through Source and SearchProfile.
+    /// </summary>
+    public long OwnerChatId { get; set; }
+
+    /// <summary>When this user's source first stored the job (retention is judged by this, not by the job's own first-seen time).</summary>
+    public DateTime CreatedUtc { get; set; }
 
     /// <summary>Filters were evaluated for this job (matched or not).</summary>
     public bool Processed { get; set; }

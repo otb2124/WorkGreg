@@ -9,7 +9,12 @@ namespace WorkGreg.Data;
 public class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
 {
     public DbSet<Source> Sources => Set<Source>();
+
+    /// <summary>Raw vacancies, stored once per (provider, external id). Nothing in here is per-user.</summary>
     public DbSet<Job> Jobs => Set<Job>();
+
+    /// <summary>Per-user state of a vacancy (filters evaluated? message sent?). One row per source that found the job.</summary>
+    public DbSet<JobDelivery> JobDeliveries => Set<JobDelivery>();
 
     /// <summary>Per-user settings (paused, delivery mode).</summary>
     public DbSet<UserSettings> UserSettings => Set<UserSettings>();
@@ -32,20 +37,29 @@ public class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
 
     protected override void OnModelCreating(ModelBuilder b)
     {
-        // Ownership chain: SearchProfile -> Source -> Job. Deleting a parent deletes everything below it in the database.
+        // Ownership chain: SearchProfile -> Source -> JobDelivery. Deleting a parent deletes everything below it in the database.
+        // A Job is NOT owned by anybody: it is shared by every delivery that points at it. Deleting a delivery leaves the job
+        // alone; RetentionService removes jobs nobody references any more. Deleting a job (retention only) takes its deliveries along.
         // (EF Core's SQLite provider turns PRAGMA foreign_keys on for every connection.)
         b.Entity<Source>().HasOne(s => s.SearchProfile).WithMany()
             .HasForeignKey(s => s.SearchProfileId).OnDelete(DeleteBehavior.Cascade);
-        b.Entity<Job>().HasOne<Source>().WithMany()
-            .HasForeignKey(j => j.SourceId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<JobDelivery>().HasOne(d => d.Job).WithMany()
+            .HasForeignKey(d => d.JobId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<JobDelivery>().HasOne<Source>().WithMany()
+            .HasForeignKey(d => d.SourceId).OnDelete(DeleteBehavior.Cascade);
 
         b.Entity<Source>().Property(s => s.Type).HasConversion<string>();
         // A provider can be attached to a profile only once (NULL providers = legacy raw-URL rows, not constrained).
         b.Entity<Source>().HasIndex(s => new { s.SearchProfileId, s.Provider }).IsUnique();
 
-        b.Entity<Job>().HasIndex(j => new { j.SourceId, j.ExternalId }).IsUnique();
-        b.Entity<Job>().HasIndex(j => new { j.OwnerChatId, j.Hash });
-        b.Entity<Job>().HasIndex(j => new { j.OwnerChatId, j.Processed });
+        // A vacancy is identified by who published it and the id they gave it.
+        b.Entity<Job>().HasIndex(j => new { j.Provider, j.ExternalId }).IsUnique();
+        // "Has this user already been sent this vacancy under another board?" joins deliveries to jobs by hash.
+        b.Entity<Job>().HasIndex(j => j.Hash);
+
+        // One delivery per source and job; JobId gets its own index (EF adds it for the foreign key) for the retention orphan check.
+        b.Entity<JobDelivery>().HasIndex(d => new { d.SourceId, d.JobId }).IsUnique();
+        b.Entity<JobDelivery>().HasIndex(d => new { d.OwnerChatId, d.Processed });
 
         b.Entity<SearchProfile>().HasIndex(p => p.OwnerChatId);
         AsList(b.Entity<SearchProfile>().Property(p => p.Include));
