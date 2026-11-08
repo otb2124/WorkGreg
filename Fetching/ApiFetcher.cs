@@ -46,7 +46,7 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
 
         using var doc = JsonDocument.Parse(json);
 
-        var node = Walk(doc.RootElement, cfg.ItemsPath);
+        var node = JsonPath.Walk(doc.RootElement, cfg.ItemsPath);
         if (node is null && cfg.MissingItemsIsEmpty)
             return [];
         if (node is not { ValueKind: JsonValueKind.Array } items)
@@ -82,7 +82,7 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
                 Blank(Read(item, cfg.FieldMap, "location")),
                 url,
                 TextUtil.CleanHtml(rawDescription),
-                ParseDate(Read(item, cfg.FieldMap, "posted")),
+                DateParsing.Parse(Read(item, cfg.FieldMap, "posted")),
                 // Only a plain number counts; free text like "$31k - $52k" stays unparsed (null).
                 decimal.TryParse(Read(item, cfg.FieldMap, "salary"), NumberStyles.Number, CultureInfo.InvariantCulture, out var amount)
                     ? (int)Math.Round(amount)
@@ -95,57 +95,7 @@ public sealed class ApiFetcher(IHttpClientFactory httpFactory, HostThrottle thro
 
     private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
-    /// <summary>ISO / RFC dates, or a Unix timestamp in seconds or milliseconds (Lever, Arbeitnow, Himalayas).</summary>
-    private static DateTime? ParseDate(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-
-        if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var epoch) && epoch > 100_000_000)
-        {
-            try
-            {
-                var offset = epoch > 100_000_000_000
-                    ? DateTimeOffset.FromUnixTimeMilliseconds(epoch)
-                    : DateTimeOffset.FromUnixTimeSeconds(epoch);
-                return offset.UtcDateTime;
-            }
-            catch (ArgumentOutOfRangeException) { return null; }
-        }
-
-        return DateTime.TryParse(raw, CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt)
-            ? dt
-            : null;
-    }
-
-    /// <summary>Follows a dot-separated path ("data.jobs", "items.0.id"). Null when any step is missing.</summary>
-    private static JsonElement? Walk(JsonElement el, string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return el;
-
-        foreach (var part in path.Split('.', StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (el.ValueKind == JsonValueKind.Object && el.TryGetProperty(part, out var next))
-                el = next;
-            else if (el.ValueKind == JsonValueKind.Array && int.TryParse(part, out var i) && i >= 0 && i < el.GetArrayLength())
-                el = el[i];
-            else
-                return null;
-        }
-
-        return el;
-    }
-
-    private static string? Read(JsonElement item, Dictionary<string, string> map, string field)
-    {
-        if (!map.TryGetValue(field, out var path)) return null;
-
-        var el = Walk(item, path);
-        return el?.ValueKind switch
-        {
-            JsonValueKind.String => el.Value.GetString(),
-            JsonValueKind.Number => el.Value.GetRawText(),
-            _ => null
-        };
-    }
+    /// <summary>The item's value for one of our normalized field names, via the provider's FieldMap. Null when unmapped or missing.</summary>
+    private static string? Read(JsonElement item, Dictionary<string, string> map, string field) =>
+        map.TryGetValue(field, out var path) ? JsonPath.ReadString(item, path) : null;
 }
