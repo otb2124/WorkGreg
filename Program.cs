@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
+    .AddClock()
     .AddWorkGregOptions()
     .AddPersistence(builder.Configuration)
     .AddFetching()

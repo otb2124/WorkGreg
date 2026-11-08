@@ -192,6 +192,9 @@ namespace WorkGreg.Migrations
                     b.Property<int>("DigestHourUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<DateTime?>("LastDigestSentUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("Paused")
                         .HasColumnType("INTEGER");
 

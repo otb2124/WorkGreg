@@ -1,4 +1,5 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using WorkGreg.Data;
 using WorkGreg.Domain;
 using WorkGreg.Fetching;
@@ -7,49 +8,44 @@ using WorkGreg.Filtering;
 namespace WorkGreg.Services;
 
 /// <summary>
-/// Raw fetch results by (type, url) for one cycle: searches that share a URL cost one request
-/// (e.g. two profiles that both use Remotive, whose URL doesn't depend on the keyword).
-/// </summary>
-public sealed class FetchCache
-{
-    private readonly Dictionary<string, IReadOnlyList<FetchedJob>> _items = [];
-
-    public async Task<IReadOnlyList<FetchedJob>> GetOrFetchAsync(
-        string key, Func<Task<IReadOnlyList<FetchedJob>>> fetch)
-    {
-        if (_items.TryGetValue(key, out var hit)) return hit;
-
-        var items = await fetch();
-        _items[key] = items;
-        return items;
-    }
-}
-
-/// <summary>
-/// Brings one source up to date: fetch, keep what matches the profile's keyword, store what is new.
+/// Brings one source up to date: take the fetched vacancies, keep what matches the profile's keyword, store what is new.
+/// The network request itself comes from the cycle's <see cref="FetchPipeline"/> (possibly already finished).
 /// Never throws for a source problem: it is recorded on the source (and alerted) and the cycle goes on.
 /// </summary>
 public sealed class SourceSyncService(
-    FetcherRegistry fetchers,
     FailureAlerter alerter,
+    IOptions<RetentionOptions> retention,
+    TimeProvider time,
     ILogger<SourceSyncService> log)
 {
+    /// <summary>
+    /// What to fetch for this source, or null when its catalog provider was removed (dead feed, wrong token...)
+    /// and its stale URL must not be hit. Pure: no I/O, so the cycle can plan ahead.
+    /// </summary>
+    public FetchContext? Plan(Source source, SearchProfile profile)
+    {
+        var provider = SourceCatalog.Find(source.Provider);
+        if (source.Provider is not null && provider is null) return null;
+
+        // Derived from the profile's current keyword, so a stale stored Url can never be fetched.
+        var url = provider is not null ? provider.BuildUrl(profile.Keyword) : source.Url;
+        return new FetchContext(source, provider, url, profile.Keyword);
+    }
+
     public async Task SyncAsync(
-        AppDb db, Source source, SearchProfile profile, FetchCache cache,
+        AppDb db, Source source, SearchProfile profile, FetchPipeline fetches,
         HashSet<long> unavailable, CancellationToken ct)
     {
         try
         {
-            var provider = SourceCatalog.Find(source.Provider);
-
-            // A catalog source that was removed from SourceCatalog (dead feed, wrong token...). Don't hit its stale URL.
-            if (source.Provider is not null && provider is null)
+            var plan = Plan(source, profile);
+            if (plan is null)
             {
                 await MarkRemovedAsync(db, source, ct);
                 return;
             }
 
-            var items = await FetchAsync(db, source, provider, profile, cache, ct);
+            var items = await FetchAsync(db, plan, fetches, ct);
             items = KeepKeywordMatches(items, profile);
 
             var added = await StoreNewAsync(db, source, profile, items, ct);
@@ -80,15 +76,11 @@ public sealed class SourceSyncService(
             source.Id, source.Name, source.Provider);
     }
 
-    private async Task<IReadOnlyList<FetchedJob>> FetchAsync(
-        AppDb db, Source source, SourceProvider? provider, SearchProfile profile, FetchCache cache, CancellationToken ct)
+    private static async Task<IReadOnlyList<FetchedJob>> FetchAsync(
+        AppDb db, FetchContext plan, FetchPipeline fetches, CancellationToken ct)
     {
-        // Derived from the profile's current keyword, so a stale stored Url can never be fetched.
-        var url = provider is not null ? provider.BuildUrl(profile.Keyword) : source.Url;
-        var cacheKey = $"{source.Type}|{url}";
-
-        var items = await cache.GetOrFetchAsync(cacheKey, () =>
-            fetchers.Get(source.Type).FetchAsync(new FetchContext(source, provider, url, profile.Keyword), ct));
+        var items = await fetches.GetAsync(plan).WaitAsync(ct);
+        var source = plan.Source;
 
         // A scraper whose selectors broke returns nothing and still "succeeds". Count that as a failure
         // so the usual 3-in-a-row alert fires. Feeds are excluded: an empty search feed is normal.
@@ -110,7 +102,7 @@ public sealed class SourceSyncService(
     }
 
     /// <summary>Stores vacancies not seen before for this source and records the successful sync. Returns how many were new.</summary>
-    private static async Task<int> StoreNewAsync(
+    private async Task<int> StoreNewAsync(
         AppDb db, Source source, SearchProfile profile, IReadOnlyList<FetchedJob> items, CancellationToken ct)
     {
         var known = (await db.Jobs
@@ -122,11 +114,17 @@ public sealed class SourceSyncService(
         // Scope for vacancies without a company, see JobHasher.
         var hashScope = source.Provider ?? $"source{source.Id}";
 
-        var now = DateTime.UtcNow;
+        var now = time.GetUtcNow().UtcDateTime;
+
+        // Anything posted before the retention window would be deleted again by the retention job and then come
+        // back as "new" on the next fetch, so it is not stored at all. (Postings without a date can't be told apart.)
+        var oldestAllowed = retention.Value.CutoffUtc(now);
+
         var added = 0;
 
         foreach (var item in items)
         {
+            if (oldestAllowed is { } cutoff && item.PostedUtc is { } posted && posted < cutoff) continue;
             if (!known.Add(item.ExternalId)) continue;
 
             db.Jobs.Add(new Job

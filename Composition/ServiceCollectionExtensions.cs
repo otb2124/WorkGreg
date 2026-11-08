@@ -4,6 +4,7 @@ using WorkGreg.Fetching;
 using WorkGreg.Services;
 using WorkGreg.Telegram;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using global::Telegram.Bot;
 
@@ -12,15 +13,27 @@ namespace WorkGreg.Composition;
 /// <summary>Program.cs reads as a list of features; each feature registers its own services here.</summary>
 public static class ServiceCollectionExtensions
 {
-    /// <summary>Binds Bot / Polling / Api and checks them at startup (the app refuses to start on a bad config).</summary>
+    /// <summary>
+    /// The one clock. Everything that needs "now", a delay or a timer takes a TimeProvider, so tests can swap in a
+    /// FakeTimeProvider (Microsoft.Extensions.TimeProvider.Testing) and move time by hand.
+    /// </summary>
+    public static IServiceCollection AddClock(this IServiceCollection services)
+    {
+        services.TryAddSingleton(TimeProvider.System);
+        return services;
+    }
+
+    /// <summary>Binds Bot / Polling / Retention / Api and checks them at startup (the app refuses to start on a bad config).</summary>
     public static IServiceCollection AddWorkGregOptions(this IServiceCollection services)
     {
         services.AddSingleton<IValidateOptions<BotOptions>, BotOptionsValidator>();
         services.AddSingleton<IValidateOptions<PollOptions>, PollOptionsValidator>();
+        services.AddSingleton<IValidateOptions<RetentionOptions>, RetentionOptionsValidator>();
         services.AddSingleton<IValidateOptions<ApiOptions>, ApiOptionsValidator>();
 
         services.AddOptions<BotOptions>().BindConfiguration("Bot").ValidateOnStart();
         services.AddOptions<PollOptions>().BindConfiguration("Polling").ValidateOnStart();
+        services.AddOptions<RetentionOptions>().BindConfiguration("Retention").ValidateOnStart();
         services.AddOptions<ApiOptions>().BindConfiguration("Api").ValidateOnStart();
 
         return services;
@@ -70,8 +83,14 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<INotifier, TelegramNotifier>();
         services.AddSingleton<PendingInputStore>();
-        services.AddScoped<CommandHandler>();
         services.AddScoped<MenuHandler>();
+
+        // Telegram layer: BotService (lifecycle) -> UpdateDispatcher (auth + routing) -> command classes.
+        // Every class marked [Command] / [Callback] is found here, so adding a command means adding one class.
+        services.AddSingleton<IBotIo, BotIo>();
+        services.AddSingleton<BackgroundChecks>();
+        services.AddBotRoutes(typeof(ServiceCollectionExtensions).Assembly);
+        services.AddSingleton<UpdateDispatcher>();
         services.AddHostedService<BotService>();
 
         return services;
@@ -84,6 +103,10 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SourceSyncService>();
         services.AddSingleton<DeliveryService>();
         services.AddSingleton<PollRunner>();
+        services.AddHostedService<PollingWorker>();
+
+        services.AddSingleton<RetentionService>();
+        services.AddHostedService<RetentionWorker>();
         return services;
     }
 

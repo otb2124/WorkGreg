@@ -3,14 +3,15 @@ using Microsoft.Extensions.Options;
 namespace WorkGreg.Services;
 
 /// <summary>Triggers a poll cycle on a fixed interval (default: every hour).</summary>
-public sealed class PollingWorker(PollRunner runner, IOptions<PollOptions> options, ILogger<PollingWorker> log)
+public sealed class PollingWorker(
+    PollRunner runner, IOptions<PollOptions> options, TimeProvider time, ILogger<PollingWorker> log)
     : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        await Task.Delay(TimeSpan.FromSeconds(options.Value.StartupDelaySeconds), ct);
+        await Task.Delay(TimeSpan.FromSeconds(options.Value.StartupDelaySeconds), time, ct);
 
-        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(options.Value.IntervalMinutes));
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(options.Value.IntervalMinutes), time);
         do
         {
             try

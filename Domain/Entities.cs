@@ -118,7 +118,9 @@ public class UserSettings
     /// <summary>Delivery mode: instant per poll, or daily digest at DigestHourUtc.</summary>
     public DeliveryMode Delivery { get; set; } = DeliveryMode.Instant;
     public int DigestHourUtc { get; set; } = 9;
+
+    /// <summary>When the last digest was handed over (UTC). Null = never; see <see cref="DigestSchedule"/>.</summary>
+    public DateTime? LastDigestSentUtc { get; set; }
 }
 
 public enum DeliveryMode { Instant = 0, Digest = 1 }
-

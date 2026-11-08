@@ -6,11 +6,22 @@ using WorkGreg.Filtering;
 
 namespace WorkGreg.Services;
 
+/// <summary>One vacancy going into a digest, with the labels the digest groups it under.</summary>
+public readonly record struct DigestItem(Job Job, string SourceName, string ProfileName);
+
+/// <summary>A ready digest message and how many of the offered vacancies fit into it (the first <see cref="Included"/>).</summary>
+public readonly record struct DigestPage(string Html, int Included);
+
 /// <summary>Everything the poll cycle says to a user, as Telegram HTML. Pure text: no I/O, no state.</summary>
 public static class MessageFormatter
 {
     private const int SnippetLength = 350;
     private const int MaxLineLength = 200;
+
+    // Telegram allows 4096 characters per message; stay well below it (the markup counts here, which is conservative).
+    private const int MaxDigestLength = 3800;
+    private const int DigestTitleReserve = 80;
+    private const int DigestFooterReserve = 120;
 
     public static string Vacancy(
         Job job, string sourceName, string profileName, ProfileCriteria criteria, DateTime? nowUtc = null)
@@ -60,6 +71,69 @@ public static class MessageFormatter
 
         sb.AppendLine();
         sb.Append($"<a href=\"{WebUtility.HtmlEncode(job.Url)}\">Open vacancy</a>");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// One message for the daily digest: compact lines grouped by profile. Takes the vacancies in the order given
+    /// (newest first), as many as fit under <paramref name="maxItems"/> and Telegram's size limit (at least one).
+    /// When some are left over, the message says they follow in the next digest.
+    /// </summary>
+    public static DigestPage Digest(IReadOnlyList<DigestItem> items, int maxItems)
+    {
+        var included = new List<(DigestItem Item, string Line)>();
+        var profilesSeen = new HashSet<string>();
+        var length = DigestTitleReserve + DigestFooterReserve;
+
+        foreach (var item in items)
+        {
+            var line = DigestLine(item.Job);
+            var cost = line.Length + 1 +
+                       (profilesSeen.Contains(item.ProfileName) ? 0 : DigestProfileHeader(item.ProfileName, 99).Length + 2);
+
+            if (included.Count > 0 && (included.Count >= maxItems || length + cost > MaxDigestLength)) break;
+
+            profilesSeen.Add(item.ProfileName);
+            length += cost;
+            included.Add((item, line));
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"🗓 <b>Digest</b> · {included.Count} new {(included.Count == 1 ? "vacancy" : "vacancies")}");
+
+        // GroupBy keeps the order of first appearance, so the profile with the newest vacancy comes first.
+        foreach (var group in included.GroupBy(x => x.Item.ProfileName))
+        {
+            sb.AppendLine();
+            sb.AppendLine(DigestProfileHeader(group.Key, group.Count()));
+            foreach (var (_, line) in group) sb.AppendLine(line);
+        }
+
+        var more = items.Count - included.Count;
+        if (more > 0)
+        {
+            sb.AppendLine();
+            sb.Append($"… {more} more will come in the next digest");
+        }
+
+        return new DigestPage(sb.ToString().TrimEnd(), included.Count);
+    }
+
+    private static string DigestProfileHeader(string profileName, int count) =>
+        $"🔎 <b>{Html(Truncate(profileName, 60))}</b> ({count})";
+
+    private static string DigestLine(Job job)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"• <a href=\"{WebUtility.HtmlEncode(job.Url)}\">{Html(Truncate(job.Title, 120))}</a>");
+
+        var details = new List<string>();
+        if (!string.IsNullOrWhiteSpace(job.Company)) details.Add(Html(Truncate(job.Company, 60)));
+        if (!string.IsNullOrWhiteSpace(job.Location)) details.Add($"📍 {Html(Truncate(job.Location, 60))}");
+        if (RemoteCriterion.LooksRemote(job)) details.Add("🌐");
+        if (job.Salary is { } salary) details.Add($"💰 {salary:N0}");
+        if (details.Count > 0) sb.Append(" — ").Append(string.Join(" · ", details));
+
         return sb.ToString();
     }
 

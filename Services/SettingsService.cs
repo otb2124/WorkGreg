@@ -8,7 +8,7 @@ namespace WorkGreg.Services;
 /// Use cases for the user-level settings that apply to all profiles (pause, delivery mode, digest hour).
 /// Used by the Telegram bot and the HTTP API. A user with no row yet simply has the defaults.
 /// </summary>
-public sealed class SettingsService(AppDb db)
+public sealed class SettingsService(AppDb db, TimeProvider time)
 {
     private const int LastHour = 23;
 
@@ -35,8 +35,8 @@ public sealed class SettingsService(AppDb db)
             return Error.Validation($"The digest hour must be between 0 and {LastHour} (UTC).");
 
         var settings = await LoadOrCreateAsync(chatId, ct);
-        settings.Delivery = mode;
-        if (mode == DeliveryMode.Digest) settings.DigestHourUtc = digestHourUtc!.Value;
+        var hour = mode == DeliveryMode.Digest ? digestHourUtc!.Value : settings.DigestHourUtc;
+        Apply(settings, mode, hour);
         await db.SaveChangesAsync(ct);
         return settings;
     }
@@ -47,10 +47,21 @@ public sealed class SettingsService(AppDb db)
     {
         var settings = await LoadOrCreateAsync(chatId, ct);
         settings.Paused = paused;
-        settings.Delivery = delivery;
-        settings.DigestHourUtc = Math.Clamp(digestHourUtc, 0, LastHour);
+        Apply(settings, delivery, Math.Clamp(digestHourUtc, 0, LastHour));
         await db.SaveChangesAsync(ct);
         return settings;
+    }
+
+    private void Apply(UserSettings settings, DeliveryMode mode, int digestHourUtc)
+    {
+        var enteringDigest = mode == DeliveryMode.Digest && settings.Delivery != DeliveryMode.Digest;
+
+        settings.Delivery = mode;
+        settings.DigestHourUtc = digestHourUtc;
+
+        // Switching to digest counts as "a digest was just handed over": the first one arrives at the next digest
+        // time instead of immediately, whatever the hour is right now.
+        if (enteringDigest) settings.LastDigestSentUtc = time.GetUtcNow().UtcDateTime;
     }
 
     private async Task<UserSettings> LoadOrCreateAsync(long chatId, CancellationToken ct)

@@ -36,6 +36,28 @@ public sealed class PollOptionsValidator : IValidateOptions<PollOptions>
             errors.Add("Polling:MaxMessagesPerRun must be between 1 and 200.");
         if (options.SendDelayMilliseconds is < 0 or > 5000)
             errors.Add("Polling:SendDelayMilliseconds must be between 0 and 5000.");
+        if (options.MaxParallelFetches is < 1 or > 16)
+            errors.Add("Polling:MaxParallelFetches must be between 1 and 16 (1 = one source at a time).");
+        if (options.DigestMaxItems is < 1 or > 100)
+            errors.Add("Polling:DigestMaxItems must be between 1 and 100.");
+
+        return errors.Count > 0 ? ValidateOptionsResult.Fail(errors) : ValidateOptionsResult.Success;
+    }
+}
+
+public sealed class RetentionOptionsValidator : IValidateOptions<RetentionOptions>
+{
+    public ValidateOptionsResult Validate(string? name, RetentionOptions options)
+    {
+        var errors = new List<string>();
+
+        // A short window would delete vacancies the sites still list, and they would be sent again as "new".
+        if (options.JobRetentionDays is not 0 and (< 14 or > 3650))
+            errors.Add("Retention:JobRetentionDays must be 0 (keep everything) or between 14 and 3650.");
+        if (options.IntervalHours is < 1 or > 168)
+            errors.Add("Retention:IntervalHours must be between 1 and 168.");
+        if (options.StartupDelaySeconds < 0)
+            errors.Add("Retention:StartupDelaySeconds can't be negative.");
 
         return errors.Count > 0 ? ValidateOptionsResult.Fail(errors) : ValidateOptionsResult.Success;
     }

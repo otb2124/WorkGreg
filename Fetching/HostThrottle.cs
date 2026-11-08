@@ -3,10 +3,11 @@ using System.Collections.Concurrent;
 namespace WorkGreg.Fetching;
 
 /// <summary>
-/// Politeness: requests to the same host run one at a time with a gap between them.
+/// Politeness: requests to the same host run one at a time with a gap between them. Requests to different hosts
+/// don't wait for each other, so the caller may fetch several hosts in parallel (see <see cref="FetchPipeline"/>).
 /// Every fetcher sends its HTTP request through <see cref="RunAsync{T}"/>.
 /// </summary>
-public sealed class HostThrottle
+public sealed class HostThrottle(TimeProvider time)
 {
     private static readonly TimeSpan MinGap = TimeSpan.FromSeconds(2);
 
@@ -25,15 +26,17 @@ public sealed class HostThrottle
         await state.Gate.WaitAsync(ct);
         try
         {
-            var wait = state.NextAllowedUtc - DateTime.UtcNow;
-            if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+            var wait = state.NextAllowedUtc - Now();
+            if (wait > TimeSpan.Zero) await Task.Delay(wait, time, ct);
 
             try { return await action(); }
-            finally { state.NextAllowedUtc = DateTime.UtcNow + MinGap; }
+            finally { state.NextAllowedUtc = Now() + MinGap; }
         }
         finally
         {
             state.Gate.Release();
         }
     }
+
+    private DateTime Now() => time.GetUtcNow().UtcDateTime;
 }
