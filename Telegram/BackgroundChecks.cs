@@ -1,4 +1,6 @@
 ﻿using WorkGreg.Services;
+using WorkGreg.Telegram.Menu;
+using static WorkGreg.Telegram.MenuKit;
 using static WorkGreg.Telegram.Replies;
 
 namespace WorkGreg.Telegram;
@@ -38,9 +40,12 @@ internal sealed class BackgroundChecks(IServiceScopeFactory scopes, IBotIo io, I
         try
         {
             using var scope = scopes.CreateScope();
-            var menu = scope.ServiceProvider.GetRequiredService<MenuHandler>();
-            var screen = await menu.HandleCallbackAsync(chatId, messageId, "chk", ct);   // runs the check, returns the main menu
-            await io.EditScreenAsync(chatId, messageId, screen, ct);
+            var jobs = scope.ServiceProvider.GetRequiredService<JobService>();
+            var main = scope.ServiceProvider.GetRequiredService<MainScreen>();
+
+            // Runs the check, then shows the main menu with the outcome above it.
+            var notice = Notice(await jobs.CheckNowAsync(chatId, ct), CheckFinished);
+            await io.EditScreenAsync(chatId, messageId, await main.RenderAsync(chatId, notice, ct), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* app is shutting down */ }
         catch (Exception ex)

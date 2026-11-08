@@ -29,21 +29,7 @@ internal sealed class CommandRegistry
     public bool TryGet(string name, out Type type) => _types.TryGetValue(name, out type!);
 }
 
-/// <summary>Callback data to handler class, for the buttons that have their own class.</summary>
-internal sealed class CallbackRegistry
-{
-    private readonly Dictionary<string, Type> _types;
-
-    public CallbackRegistry(IReadOnlyList<(Type Type, CallbackAttribute Attr)> callbacks) =>
-        _types = RouteScanner.BuildMap(
-            callbacks.Select(c => (c.Type, (BotRouteAttribute)c.Attr)),
-            StringComparer.Ordinal,
-            name => name);
-
-    public bool TryGet(string data, out Type type) => _types.TryGetValue(data, out type!);
-}
-
-/// <summary>Finds handler classes by attribute and fails at startup (not at the first message) on a wiring mistake.</summary>
+/// <summary>Finds command classes by attribute and fails at startup (not at the first message) on a wiring mistake.</summary>
 internal static class RouteScanner
 {
     public static List<(Type Type, TAttr Attr)> Find<THandler, TAttr>(Assembly assembly) where TAttr : BotRouteAttribute
@@ -78,14 +64,14 @@ internal static class RouteScanner
     public static IServiceCollection AddBotRoutes(this IServiceCollection services, Assembly assembly)
     {
         var commands = Find<IBotCommand, CommandAttribute>(assembly);
-        var callbacks = Find<IBotCallback, CallbackAttribute>(assembly);
+        var handlers = CallbackRouter.Find(assembly);
 
-        // Scoped: handlers use the scoped services (ProfileService, MenuHandler, ...) and live for one update.
+        // Scoped: handlers use the scoped services (ProfileService, ...) and live for one update.
         foreach (var (type, _) in commands) services.TryAddScoped(type);
-        foreach (var (type, _) in callbacks) services.TryAddScoped(type);
+        foreach (var (type, _) in handlers) services.TryAddScoped(type);
 
         services.AddSingleton(new CommandRegistry(commands));
-        services.AddSingleton(new CallbackRegistry(callbacks));
+        services.AddSingleton(new CallbackRouter(handlers));   // throws here if an action has no handler
         return services;
     }
 }

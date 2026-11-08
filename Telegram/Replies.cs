@@ -98,4 +98,7 @@ internal static class Replies
         count == 0
             ? "Nothing to reset yet, no vacancies stored."
             : $"Reset {count} stored vacancies. Run /check to send everything that matches your profiles again.";
+
+    public static string RateLimited(TimeSpan retryAfter) =>
+       $"⏳ Too many requests. Try again in {Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds))} s.";
 }

@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Options;
 using WorkGreg.Services;
+using WorkGreg.Telegram.Menu;
 using global::Telegram.Bot;
 using global::Telegram.Bot.Exceptions;
 using global::Telegram.Bot.Polling;
@@ -8,15 +9,18 @@ using global::Telegram.Bot.Types;
 namespace WorkGreg.Telegram;
 
 /// <summary>
-/// Receives every update. Its three jobs: drop chats that are not allowed, route what is left to the class that
-/// handles it, and turn a failure into a log line (and, where the user is waiting, an apology).
-/// What a command does lives in the command class; how a message is sent lives in <see cref="IBotIo"/>.
+/// Receives every update. Its jobs: drop chats that are not allowed, drop chats that send too much, route what is left
+/// to the class that handles it, and turn a failure into a log line (and, where the user is waiting, an apology).
+/// What a command does lives in the command class, what a button does lives in its <see cref="ICallbackHandler"/>,
+/// how a message is sent lives in <see cref="IBotIo"/>.
 /// </summary>
 internal sealed class UpdateDispatcher(
     IServiceScopeFactory scopes,
     IOptions<BotOptions> options,
     CommandRegistry commands,
-    CallbackRegistry callbacks,
+    CallbackRouter callbacks,
+    ChatRateLimiter limiter,
+    PendingInputStore pending,
     IBotIo io,
     ILogger<UpdateDispatcher> log) : IUpdateHandler
 {
@@ -58,17 +62,24 @@ internal sealed class UpdateDispatcher(
             return;   // no reply sent
         }
 
+        var admission = limiter.TryAcquire(chatId);
+        if (!admission.Allowed)
+        {
+            LogLimited(chatId, admission);
+            if (admission.Notify) await io.ReplyAsync(chatId, Replies.RateLimited(admission.RetryAfter), ct);
+            return;
+        }
+
         using var scope = scopes.CreateScope();
-        var menu = scope.ServiceProvider.GetRequiredService<MenuHandler>();
 
         if (CommandLine.TryParse(text, out var line))
         {
-            menu.CancelPending(chatId);   // a slash command abandons any pending prompt
+            pending.Clear(chatId);   // a slash command abandons any pending prompt
             await RunCommandAsync(scope.ServiceProvider, chatId, line, text, ct);
             return;
         }
 
-        await HandlePlainTextAsync(menu, message, ct);
+        await HandlePlainTextAsync(scope.ServiceProvider, message, ct);
     }
 
     private async Task RunCommandAsync(IServiceProvider services, long chatId, CommandLine line, string text, CancellationToken ct)
@@ -92,7 +103,7 @@ internal sealed class UpdateDispatcher(
     }
 
     /// <summary>Plain text is either the answer to a prompt ("send me your keywords"), or noise.</summary>
-    private async Task HandlePlainTextAsync(MenuHandler menu, Message message, CancellationToken ct)
+    private async Task HandlePlainTextAsync(IServiceProvider services, Message message, CancellationToken ct)
     {
         var chatId = message.Chat.Id;
         var text = message.Text!;
@@ -100,19 +111,20 @@ internal sealed class UpdateDispatcher(
         TextResult? result;
         try
         {
-            result = await menu.HandleTextAsync(chatId, text, ct);
+            result = await services.GetRequiredService<PendingInputHandler>().HandleAsync(chatId, text, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogError(ex, "Text input failed: {Text}", text);
-            menu.CancelPending(chatId);
+            pending.Clear(chatId);
             await io.ReplyAsync(chatId, Failed, ct);
             return;
         }
 
         if (result is null)
         {
-            await io.SendScreenAsync(chatId, await menu.MainAsync(chatId, "Use the buttons below 👇", ct), ct);
+            var main = services.GetRequiredService<MainScreen>();
+            await io.SendScreenAsync(chatId, await main.RenderAsync(chatId, "Use the buttons below 👇", ct), ct);
             return;
         }
 
@@ -131,7 +143,6 @@ internal sealed class UpdateDispatcher(
         }
 
         var chatId = msg.Chat.Id;
-        var messageId = msg.MessageId;
 
         if (!options.Value.IsAllowed(chatId))
         {
@@ -139,40 +150,38 @@ internal sealed class UpdateDispatcher(
             return;
         }
 
-        using var scope = scopes.CreateScope();
-
-        // Buttons with their own class.
-        if (callbacks.TryGet(data, out var type))
+        // A tap is always answered (that stops the spinner), but a limited chat only gets the toast once per burst.
+        var admission = limiter.TryAcquire(chatId);
+        if (!admission.Allowed)
         {
-            var callback = (IBotCallback)scope.ServiceProvider.GetRequiredService(type);
-            await callback.ExecuteAsync(new CallbackContext(cq.Id, chatId, messageId, data, io, ct));
+            LogLimited(chatId, admission);
+            await io.AnswerCallbackAsync(cq.Id, admission.Notify ? Replies.RateLimited(admission.RetryAfter) : null, ct);
             return;
         }
 
-        // Everything else is a menu page.
-        var menu = scope.ServiceProvider.GetRequiredService<MenuHandler>();
-
-        // Slow action (a poll cycle): stop the button spinner and show progress first.
-        var slow = MenuHandler.IsSlow(data);
-        if (slow)
+        // Data this bot did not produce (a very old keyboard, an edited client): show the main menu.
+        if (!CallbackData.TryParse(data, out var parsed))
         {
-            await io.AnswerCallbackAsync(cq.Id, null, ct);
-            await io.EditScreenAsync(chatId, messageId, MenuHandler.Busy("⏳ Checking your sources…"), ct);
+            log.LogDebug("Unrecognized callback data {Data}", data);
+            parsed = CallbackData.Home;
         }
 
-        Screen screen;
+        using var scope = scopes.CreateScope();
         try
         {
-            screen = await menu.HandleCallbackAsync(chatId, messageId, data, ct);
+            await callbacks.RouteAsync(scope.ServiceProvider, new CallbackContext(cq.Id, chatId, msg.MessageId, parsed, io, ct));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             log.LogError(ex, "Callback failed: {Data}", data);
-            if (!slow) await io.AnswerCallbackAsync(cq.Id, Failed, ct);
-            return;
+            await io.AnswerCallbackAsync(cq.Id, Failed, ct);   // no-op if the handler already answered
         }
+    }
 
-        if (!slow) await io.AnswerCallbackAsync(cq.Id, screen.Toast, ct);
-        await io.EditScreenAsync(chatId, messageId, screen, ct);
+    private void LogLimited(long chatId, RateLimitDecision decision)
+    {
+        // One line per burst, not one per refused update: the log must not become the next thing a flood fills.
+        if (decision.Notify)
+            log.LogInformation("Rate limiting chat {ChatId}, next request in {RetryAfterSeconds:0.0}s", chatId, decision.RetryAfter.TotalSeconds);
     }
 }

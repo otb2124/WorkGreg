@@ -1,12 +1,13 @@
-﻿using System.Text.Json.Serialization;
+﻿using global::Telegram.Bot;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
+using System.Text.Json.Serialization;
 using WorkGreg.Data;
 using WorkGreg.Fetching;
 using WorkGreg.Services;
 using WorkGreg.Telegram;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Options;
-using global::Telegram.Bot;
+using WorkGreg.Telegram.Menu;
 
 namespace WorkGreg.Composition;
 
@@ -83,7 +84,12 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<INotifier, TelegramNotifier>();
         services.AddSingleton<PendingInputStore>();
-        services.AddScoped<MenuHandler>();
+        services.AddScoped<PromptScreen>();
+        services.AddScoped<PendingInputHandler>();
+
+        services.AddSingleton<IValidateOptions<RateLimitOptions>, RateLimitOptionsValidator>();
+        services.AddOptions<RateLimitOptions>().BindConfiguration("Bot:RateLimit").ValidateOnStart();
+        services.AddSingleton<ChatRateLimiter>();
 
         // Telegram layer: BotService (lifecycle) -> UpdateDispatcher (auth + routing) -> command classes.
         // Every class marked [Command] / [Callback] is found here, so adding a command means adding one class.
