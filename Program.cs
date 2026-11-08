@@ -7,6 +7,15 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Secrets (Bot:Token, Api:ApiKey, ...) live in secrets.json next to the app and are never committed.
+// Looked for in the content root (the project folder in development, the working directory when deployed)
+// and next to the executable. Optional: the app still starts without it if the values come from elsewhere.
+// A later file overrides an earlier one; environment variables are added again afterwards so they still win.
+builder.Configuration
+    .AddJsonFile(Path.Combine(builder.Environment.ContentRootPath, "secrets.json"), optional: true, reloadOnChange: false)
+    .AddJsonFile(Path.Combine(AppContext.BaseDirectory, "secrets.json"), optional: true, reloadOnChange: false)
+    .AddEnvironmentVariables();
+
 builder.Services
     .AddClock()
     .AddWorkGregOptions()

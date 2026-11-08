@@ -144,3 +144,11 @@ TestResults/
 .idea/**/libraries
 .idea/**/mongoSettings.xml
 *.iws
+
+
+
+/publish
+*.zip
+secrets.json
+appsettings.Development.json
+appsettings.Production.json

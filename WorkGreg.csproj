@@ -6,6 +6,9 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<RootNamespace>WorkGreg</RootNamespace>
 	  <UserSecretsId>a7854c93-1b2e-42aa-8675-721d0ecdaa2d</UserSecretsId>
+		<SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+		<DebugType>none</DebugType>
+		<IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
   </PropertyGroup>
 
 	<ItemGroup>
