@@ -63,7 +63,7 @@ public static class SourceCatalog
             KeywordExamples: ["developer", "angular"]),
 
         // Remotive documents ?search=, but it has been reported as ignored, so we don't depend on it:
-        // the keyword is enforced locally (SourceCatalog.MatchesKeyword), every keyword uses the same URL,
+        // the keyword is enforced locally (WordMatcher), every keyword uses the same URL,
         // and PollRunner fetches that URL once per cycle for all searches.
         new SourceProvider(
             Id: "remotive",
@@ -482,28 +482,4 @@ public static class SourceCatalog
 
     public static string DisplayName(SourceProvider provider, string keyword) => $"{provider.Name} · {keyword}";
 
-    /// <summary>Whole-word, punctuation-insensitive match: "full stack" matches "Full-Stack" and "Fullstack"; ".NET" doesn't match "network".</summary>
-    public static bool MatchesKeyword(string keyword, params string?[] texts)
-    {
-        var kw = NormalizeForMatch(keyword);
-        if (kw.Length == 0) return true;
-
-        var needles = new List<string> { $" {kw} " };
-        if (kw.Contains(' ')) needles.Add($" {kw.Replace(" ", "")} ");   // "full stack" -> "fullstack"
-
-        var hay = $" {NormalizeForMatch(string.Join(' ', texts.Where(t => t is not null)))} ";
-        return needles.Any(n => hay.Contains(n, StringComparison.Ordinal));
-    }
-
-    private static string NormalizeForMatch(string s)
-    {
-        var sb = new System.Text.StringBuilder(s.Length);
-        var lastSpace = true;
-        foreach (var ch in s.ToLowerInvariant())
-        {
-            if (char.IsLetterOrDigit(ch)) { sb.Append(ch); lastSpace = false; }
-            else if (!lastSpace) { sb.Append(' '); lastSpace = true; }
-        }
-        return sb.ToString().Trim();
-    }
 }

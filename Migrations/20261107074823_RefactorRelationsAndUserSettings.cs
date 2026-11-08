@@ -21,6 +21,8 @@ namespace WorkGreg.Migrations
                 name: "Profiles");
 
             migrationBuilder.DropColumn(
+
+
                 name: "Baselined",
                 table: "Sources");
 

@@ -79,8 +79,11 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddPolling(this IServiceCollection services)
     {
+        services.AddSingleton<PollCoordinator>();
+        services.AddSingleton<FailureAlerter>();
+        services.AddSingleton<SourceSyncService>();
+        services.AddSingleton<DeliveryService>();
         services.AddSingleton<PollRunner>();
-        services.AddHostedService<PollingWorker>();
         return services;
     }
 
