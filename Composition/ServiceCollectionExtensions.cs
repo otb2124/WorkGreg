@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using System.Text.Json.Serialization;
 using WorkGreg.Data;
+using WorkGreg.Domain;
 using WorkGreg.Fetching;
 using WorkGreg.Services;
 using WorkGreg.Telegram;
@@ -130,6 +131,22 @@ public static class ServiceCollectionExtensions
                 p.WithOrigins(api.AllowedOrigins).AllowAnyHeader().AllowAnyMethod();
         }));
 
+        return services;
+    }
+
+    /// <summary>
+    /// Loads providers.json and checks it (unique ids, every Api FieldMap has title + url, valid URL templates...).
+    /// A bad file stops the app at startup with one message listing every problem, like the options validators do.
+    /// Optional config key <c>Catalog:Path</c> points to another file (relative paths are resolved from the app folder).
+    /// </summary>
+    public static IServiceCollection AddSourceCatalog(this IServiceCollection services, IConfiguration configuration)
+    {
+        var configured = configuration["Catalog:Path"];
+        var path = string.IsNullOrWhiteSpace(configured) ? SourceCatalog.DefaultPath
+            : Path.IsPathRooted(configured) ? configured
+            : Path.Combine(AppContext.BaseDirectory, configured);
+
+        SourceCatalog.Load(path);
         return services;
     }
 }

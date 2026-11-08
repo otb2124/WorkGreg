@@ -1,0 +1,720 @@
+﻿// Source catalog. To support a new website, add one entry to "providers" (and a fetcher, if its type is new).
+//
+// url           Request URL. "{keyword}" is replaced with the URL-escaped search keyword (omit it when the site has no
+//               usable search: the keyword is then enforced locally and all searches share one request).
+// type          Feed | Api | Html | Browser (a matching IJobFetcher must exist and be available).
+// regions       Region ids from "regions" below; omitted = "global".
+// api           For type Api. "extends" copies one of "apiTemplates", other fields override it (fieldMap is merged).
+//               fieldMap needs at least "title" and "url"; the app refuses to start otherwise.
+// note          Free text for humans, ignored by the app.
+{
+  "regions": [
+    {
+      "id": "hr",
+      "label": "🇭🇷 Croatia"
+    },
+    {
+      "id": "us",
+      "label": "🇺🇸 USA"
+    },
+    {
+      "id": "de",
+      "label": "🇩🇪 Germany"
+    },
+    {
+      "id": "eu",
+      "label": "🇪🇺 Europe"
+    },
+    {
+      "id": "pl",
+      "label": "🇵🇱 Poland"
+    },
+    {
+      "id": "ua",
+      "label": "🇺🇦 Ukraine"
+    },
+    {
+      "id": "global",
+      "label": "🌍 Global / remote"
+    }
+  ],
+  "apiTemplates": {
+    "jobicy": {
+      "itemsPath": "jobs",
+      "fieldMap": {
+        "id": "id",
+        "title": "jobTitle",
+        "url": "url",
+        "company": "companyName",
+        "location": "jobGeo",
+        "description": "jobDescription",
+        "posted": "pubDate"
+      }
+    },
+    "arbeitnow": {
+      "itemsPath": "data",
+      "fieldMap": {
+        "id": "slug",
+        "title": "title",
+        "url": "url",
+        "company": "company_name",
+        "location": "location",
+        "description": "description",
+        "posted": "created_at"
+      }
+    },
+    "bundesagentur": {
+      "headers": {
+        "X-API-Key": "jobboerse-jobsuche"
+      },
+      "itemsPath": "stellenangebote",
+      "missingItemsIsEmpty": true,
+      "urlTemplate": "https://www.arbeitsagentur.de/jobsuche/jobdetail/{url}",
+      "fieldMap": {
+        "id": "refnr",
+        "title": "titel",
+        "url": "refnr",
+        "company": "arbeitgeber",
+        "location": "arbeitsort.ort",
+        "description": "beruf",
+        "posted": "aktuelleVeroeffentlichungsdatum"
+      }
+    },
+    "greenhouse": {
+      "itemsPath": "jobs",
+      "fieldMap": {
+        "id": "id",
+        "title": "title",
+        "url": "absolute_url",
+        "location": "location.name",
+        "description": "content",
+        "posted": "updated_at"
+      }
+    },
+    "lever": {
+      "itemsPath": "",
+      "fieldMap": {
+        "id": "id",
+        "title": "text",
+        "url": "hostedUrl",
+        "location": "categories.location",
+        "description": "descriptionPlain",
+        "posted": "createdAt",
+        "employment": "categories.commitment"
+      }
+    },
+    "ashby": {
+      "itemsPath": "jobs",
+      "fieldMap": {
+        "id": "id",
+        "title": "title",
+        "url": "jobUrl",
+        "location": "location",
+        "description": "descriptionPlain",
+        "posted": "publishedAt",
+        "employment": "employmentType"
+      }
+    }
+  },
+  "providers": [
+
+    // GLOBAL / REMOTE BOARDS
+    {
+      "id": "jobicy",
+      "name": "Jobicy",
+      "type": "Feed",
+      "url": "https://jobicy.com/?feed=job_feed&search_keywords={keyword}",
+      "keywordExamples": [ "developer", "angular", "dotnet" ]
+    },
+    {
+      "id": "wwr",
+      "name": "We Work Remotely",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/remote-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "remotive",
+      "name": "Remotive",
+      "type": "Api",
+      "url": "https://remotive.com/api/remote-jobs",
+      "keywordExamples": [ "full stack", "angular", ".net" ],
+      "api": {
+        "itemsPath": "jobs",
+        "fieldMap": {
+          "id": "id",
+          "title": "title",
+          "url": "url",
+          "company": "company_name",
+          "location": "candidate_required_location",
+          "description": "description",
+          "posted": "publication_date",
+          "employment": "job_type"
+        }
+      },
+      "note": "Remotive documents ?search= but it has been reported as ignored, so the keyword is enforced locally and every keyword shares one URL (fetched once per cycle)."
+    },
+    {
+      "id": "remoteok",
+      "name": "Remote OK",
+      "type": "Api",
+      "url": "https://remoteok.com/api",
+      "keywordExamples": [ "developer", "angular", "dotnet" ],
+      "api": {
+        "itemsPath": "",
+        "fieldMap": {
+          "id": "id",
+          "title": "position",
+          "url": "url",
+          "company": "company",
+          "location": "location",
+          "description": "description",
+          "posted": "date"
+        }
+      },
+      "note": "The response root is an array; its first element is a legal notice without 'position', which is skipped."
+    },
+    {
+      "id": "himalayas",
+      "name": "Himalayas",
+      "type": "Api",
+      "url": "https://himalayas.app/jobs/api?limit=100",
+      "keywordExamples": [ "developer", "angular", "product" ],
+      "api": {
+        "itemsPath": "jobs",
+        "fieldMap": {
+          "id": "guid",
+          "title": "title",
+          "url": "applicationLink",
+          "company": "companyName",
+          "description": "description",
+          "posted": "pubDate",
+          "employment": "employmentType"
+        }
+      }
+    },
+    {
+      "id": "workingnomads",
+      "name": "Working Nomads",
+      "type": "Api",
+      "url": "https://www.workingnomads.com/api/exposed_jobs/",
+      "keywordExamples": [ "developer", "angular", "devops" ],
+      "api": {
+        "itemsPath": "",
+        "fieldMap": {
+          "title": "title",
+          "url": "url",
+          "company": "company_name",
+          "location": "location",
+          "description": "description",
+          "posted": "pub_date"
+        }
+      }
+    },
+    {
+      "id": "jobspresso",
+      "name": "Jobspresso",
+      "type": "Feed",
+      "url": "https://jobspresso.co/?feed=job_feed&search_keywords={keyword}",
+      "keywordExamples": [ "developer", "angular", "support" ],
+      "note": "WordPress 'WP Job Manager' feed: same format Jobicy uses."
+    },
+    {
+      "id": "wwr-programming",
+      "name": "WWR · Programming",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-fullstack",
+      "name": "WWR · Full-stack",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-frontend",
+      "name": "WWR · Front-end",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-front-end-programming-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-backend",
+      "name": "WWR · Back-end",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-devops",
+      "name": "WWR · DevOps / Sysadmin",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-design",
+      "name": "WWR · Design",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-design-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-product",
+      "name": "WWR · Product",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-product-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-support",
+      "name": "WWR · Customer support",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-customer-support-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-marketing",
+      "name": "WWR · Sales & marketing",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-sales-and-marketing-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+    {
+      "id": "wwr-management",
+      "name": "WWR · Management & finance",
+      "type": "Feed",
+      "url": "https://weworkremotely.com/categories/remote-management-and-finance-jobs.rss",
+      "keywordExamples": [ "developer", "angular" ]
+    },
+
+    // USA
+    {
+      "id": "hnjobs",
+      "name": "Hacker News Jobs",
+      "type": "Feed",
+      "url": "https://hnrss.org/jobs",
+      "keywordExamples": [ "engineer", "founding", "remote" ],
+      "regions": [ "us" ],
+      "note": "Y Combinator 'Jobs' posts from Hacker News."
+    },
+    {
+      "id": "themuse",
+      "name": "The Muse · Engineering",
+      "type": "Api",
+      "url": "https://www.themuse.com/api/public/jobs?category=Software%20Engineering&page=1&descending=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "itemsPath": "results",
+        "fieldMap": {
+          "id": "id",
+          "title": "name",
+          "url": "refs.landing_page",
+          "company": "company.name",
+          "location": "locations.0.name",
+          "description": "contents",
+          "posted": "publication_date"
+        }
+      },
+      "note": "The public endpoint returns one page (20 jobs); category narrows it to engineering."
+    },
+    {
+      "id": "jobicy-usa",
+      "name": "Jobicy · USA",
+      "type": "Api",
+      "url": "https://jobicy.com/api/v2/remote-jobs?count=100&geo=usa",
+      "keywordExamples": [ "developer", "angular", "dotnet" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "jobicy"
+      }
+    },
+    {
+      "id": "gh-gitlab",
+      "name": "GitLab (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "GitLab"
+      }
+    },
+    {
+      "id": "gh-cloudflare",
+      "name": "Cloudflare (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/cloudflare/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Cloudflare"
+      }
+    },
+    {
+      "id": "gh-datadog",
+      "name": "Datadog (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/datadog/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Datadog"
+      }
+    },
+    {
+      "id": "gh-stripe",
+      "name": "Stripe (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/stripe/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Stripe"
+      }
+    },
+    {
+      "id": "gh-figma",
+      "name": "Figma (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/figma/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Figma"
+      }
+    },
+    {
+      "id": "gh-discord",
+      "name": "Discord (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/discord/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Discord"
+      }
+    },
+    {
+      "id": "gh-mongodb",
+      "name": "MongoDB (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/mongodb/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "MongoDB"
+      }
+    },
+    {
+      "id": "gh-elastic",
+      "name": "Elastic (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/elastic/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Elastic"
+      }
+    },
+    {
+      "id": "gh-databricks",
+      "name": "Databricks (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/databricks/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Databricks"
+      }
+    },
+    {
+      "id": "gh-airbnb",
+      "name": "Airbnb (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Airbnb"
+      }
+    },
+    {
+      "id": "gh-coinbase",
+      "name": "Coinbase (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/coinbase/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Coinbase"
+      }
+    },
+    {
+      "id": "lever-palantir",
+      "name": "Palantir (careers)",
+      "type": "Api",
+      "url": "https://api.lever.co/v0/postings/palantir?mode=json",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "lever",
+        "company": "Palantir"
+      }
+    },
+    {
+      "id": "ashby-openai",
+      "name": "OpenAI (careers)",
+      "type": "Api",
+      "url": "https://api.ashbyhq.com/posting-api/job-board/openai",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "ashby",
+        "company": "OpenAI"
+      }
+    },
+    {
+      "id": "ashby-notion",
+      "name": "Notion (careers)",
+      "type": "Api",
+      "url": "https://api.ashbyhq.com/posting-api/job-board/notion",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "ashby",
+        "company": "Notion"
+      }
+    },
+    {
+      "id": "ashby-ramp",
+      "name": "Ramp (careers)",
+      "type": "Api",
+      "url": "https://api.ashbyhq.com/posting-api/job-board/ramp",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "ashby",
+        "company": "Ramp"
+      }
+    },
+    {
+      "id": "ashby-linear",
+      "name": "Linear (careers)",
+      "type": "Api",
+      "url": "https://api.ashbyhq.com/posting-api/job-board/linear",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "ashby",
+        "company": "Linear"
+      }
+    },
+    {
+      "id": "ashby-supabase",
+      "name": "Supabase (careers)",
+      "type": "Api",
+      "url": "https://api.ashbyhq.com/posting-api/job-board/supabase",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "us" ],
+      "api": {
+        "extends": "ashby",
+        "company": "Supabase"
+      }
+    },
+
+    // GERMANY
+    {
+      "id": "ba",
+      "name": "Bundesagentur für Arbeit",
+      "type": "Api",
+      "url": "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6/jobs?angebotsart=1&size=100&veroeffentlichtseit=14&was={keyword}",
+      "keywordExamples": [ "softwareentwickler", "angular", "devops" ],
+      "regions": [ "de" ],
+      "api": {
+        "extends": "bundesagentur"
+      },
+      "note": "Germany's biggest job board. Titles are mostly German, so use German keywords or 'angular', 'react', '.net'. The API has no URL field: the detail link is built from the reference number (urlTemplate)."
+    },
+    {
+      "id": "ba-homeoffice",
+      "name": "Bundesagentur · Homeoffice",
+      "type": "Api",
+      "url": "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6/jobs?angebotsart=1&size=100&veroeffentlichtseit=14&was={keyword}&arbeitszeit=ho",
+      "keywordExamples": [ "softwareentwickler", "angular", "devops" ],
+      "regions": [ "de" ],
+      "api": {
+        "extends": "bundesagentur"
+      }
+    },
+    {
+      "id": "arbeitnow",
+      "name": "Arbeitnow",
+      "type": "Api",
+      "url": "https://www.arbeitnow.com/api/job-board-api",
+      "keywordExamples": [ "developer", "angular", "devops" ],
+      "regions": [ "de", "eu" ],
+      "api": {
+        "extends": "arbeitnow"
+      }
+    },
+    {
+      "id": "arbeitnow-visa",
+      "name": "Arbeitnow · Visa sponsorship",
+      "type": "Api",
+      "url": "https://www.arbeitnow.com/api/job-board-api?visa_sponsorship=true",
+      "keywordExamples": [ "developer", "engineer", "data" ],
+      "regions": [ "de", "eu" ],
+      "api": {
+        "extends": "arbeitnow"
+      },
+      "note": "Arbeitnow's documented visa_sponsorship=true filter."
+    },
+    {
+      "id": "berlinstartupjobs",
+      "name": "Berlin Startup Jobs",
+      "type": "Feed",
+      "url": "https://berlinstartupjobs.com/feed/",
+      "keywordExamples": [ "engineer", "frontend", "python" ],
+      "regions": [ "de" ],
+      "note": "Not test-fetched: if the feed turns out to mix in non-job posts, drop it."
+    },
+    {
+      "id": "jobicy-germany",
+      "name": "Jobicy · Germany",
+      "type": "Api",
+      "url": "https://jobicy.com/api/v2/remote-jobs?count=100&geo=germany",
+      "keywordExamples": [ "developer", "angular", "dotnet" ],
+      "regions": [ "de" ],
+      "api": {
+        "extends": "jobicy"
+      }
+    },
+    {
+      "id": "gh-getyourguide",
+      "name": "GetYourGuide (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/getyourguide/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "de" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "GetYourGuide"
+      }
+    },
+    {
+      "id": "gh-contentful",
+      "name": "Contentful (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/contentful/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "de" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Contentful"
+      }
+    },
+
+    // EUROPE
+    {
+      "id": "jobicy-europe",
+      "name": "Jobicy · Europe",
+      "type": "Api",
+      "url": "https://jobicy.com/api/v2/remote-jobs?count=100&geo=europe",
+      "keywordExamples": [ "developer", "angular", "dotnet" ],
+      "regions": [ "eu" ],
+      "api": {
+        "extends": "jobicy"
+      }
+    },
+    {
+      "id": "lever-spotify",
+      "name": "Spotify (careers)",
+      "type": "Api",
+      "url": "https://api.lever.co/v0/postings/spotify?mode=json",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "eu" ],
+      "api": {
+        "extends": "lever",
+        "company": "Spotify"
+      }
+    },
+
+    // POLAND
+    {
+      "id": "jobicy-poland",
+      "name": "Jobicy · Poland",
+      "type": "Api",
+      "url": "https://jobicy.com/api/v2/remote-jobs?count=100&geo=poland",
+      "keywordExamples": [ "developer", "angular", "dotnet" ],
+      "regions": [ "pl" ],
+      "api": {
+        "extends": "jobicy"
+      }
+    },
+
+    // UKRAINE
+    {
+      "id": "dou",
+      "name": "DOU.ua",
+      "type": "Feed",
+      "url": "https://jobs.dou.ua/vacancies/feeds/?search={keyword}",
+      "keywordExamples": [ "angular", ".net", "python" ],
+      "regions": [ "ua" ],
+      "note": "The first try (/vacancies/feed/) returned 404; /vacancies/feeds/ is the path DOU links from its pages. Not test-fetched yet."
+    },
+    {
+      "id": "dou-remote",
+      "name": "DOU.ua · Remote",
+      "type": "Feed",
+      "url": "https://jobs.dou.ua/vacancies/feeds/?remote&search={keyword}",
+      "keywordExamples": [ "angular", ".net", "python" ],
+      "regions": [ "ua" ]
+    },
+    {
+      "id": "djinni",
+      "name": "Djinni",
+      "type": "Feed",
+      "url": "https://djinni.co/jobs/rss/",
+      "keywordExamples": [ "angular", ".net", "python" ],
+      "regions": [ "ua" ],
+      "note": "Djinni RSS has no free-text search, so the keyword is enforced locally. Not test-fetched."
+    },
+    {
+      "id": "djinni-remote",
+      "name": "Djinni · Remote",
+      "type": "Feed",
+      "url": "https://djinni.co/jobs/rss/?employment=remote",
+      "keywordExamples": [ "angular", ".net", "python" ],
+      "regions": [ "ua" ]
+    },
+
+    // CROATIA  (MojPosao, Posao.hr and Burza rada have no RSS/JSON API: they need the Html fetcher)
+    {
+      "id": "gh-microblink",
+      "name": "Microblink (careers)",
+      "type": "Api",
+      "url": "https://boards-api.greenhouse.io/v1/boards/microblink/jobs?content=true",
+      "keywordExamples": [ "engineer", "frontend", "data" ],
+      "regions": [ "hr" ],
+      "api": {
+        "extends": "greenhouse",
+        "company": "Microblink"
+      }
+    }
+  ]
+}
