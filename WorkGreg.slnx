@@ -1,3 +1,13 @@
 <Solution>
-  <Project Path="WorkGreg.csproj" />
+  <Folder Name="/Solution Items/">
+    <File Path=".gitignore" />
+    <File Path="export_codebase.ps1" />
+    <File Path="publish.ps1" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/WorkGreg.Bot/WorkGreg.Bot.csproj" />
+    <Project Path="src/WorkGreg.Contracts/WorkGreg.Contracts.csproj" />
+    <Project Path="src/WorkGreg.Core/WorkGreg.Core.csproj" />
+    <Project Path="src/WorkGreg.Host/WorkGreg.Host.csproj" />
+  </Folder>
 </Solution>

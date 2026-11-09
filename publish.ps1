@@ -36,7 +36,7 @@ Set-Location $PSScriptRoot
 
 # ---- Settings you may want to change -------------------------------------------------------------
 
-$Project = 'WorkGreg.csproj'
+$Project = 'src/WorkGreg.Host/WorkGreg.Host.csproj'
 
 $RuntimeByPlatform = @{
     linux = 'linux-x64'
