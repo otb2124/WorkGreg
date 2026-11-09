@@ -27,16 +27,16 @@ internal sealed class StopHandler(IWorkGregClient client) : ICallbackHandler
 }
 
 /// <summary>
-/// The "🔎 Check now" button: shows progress with a Stop button, then runs the check in the background.
+/// The "🔎 Check now" button: starts the check on the core, shows progress with a Stop button, then watches it in the background.
 /// It talks to Telegram itself (and returns <see cref="CallbackResult.Handled"/>) because the progress message must be
-/// in place before the check starts: a quick check would otherwise finish first and be overwritten by "Checking…".
+/// in place before the watching starts: a quick check would otherwise finish first and be overwritten by "Checking…".
 /// </summary>
 [Handles(CallbackAction.Check)]
 internal sealed class CheckHandler(IWorkGregClient client, BackgroundChecks background) : ICallbackHandler
 {
     public async Task<CallbackResult> HandleAsync(CallbackContext ctx)
     {
-        switch (await client.GetCheckStatusAsync(ctx.ChatId, ctx.Ct))
+        switch ((await client.GetCheckAsync(ctx.ChatId, ctx.Ct)).State)
         {
             case RunStatus.Yours:
                 return CallbackResult.Answer("A check is already running");
@@ -44,12 +44,18 @@ internal sealed class CheckHandler(IWorkGregClient client, BackgroundChecks back
                 return CallbackResult.Answer("The hourly check is running right now");
         }
 
+        // Start is the authoritative answer (the status above can be stale by now).
+        var start = await client.StartCheckAsync(ctx.ChatId, ctx.Ct);
+        if (start.IsFailure) return CallbackResult.Answer(start.Error.Message);
+
         await ctx.Io.AnswerCallbackAsync(ctx.QueryId, null, ctx.Ct);
         await ctx.Io.EditScreenAsync(ctx.ChatId, ctx.MessageId, new Screen(
             "⏳ Checking your sources…\nVacancies arrive as they are found.",
             Kb(Row(Btn("⏹ Stop", CallbackData.Stop)))), ctx.Ct);
 
-        background.StartFromMenu(ctx.ChatId, ctx.MessageId, ctx.Ct);
+        // Watching starts only after the progress message is in place; the first poll is a few seconds away,
+        // so even a very quick check cannot finish before it.
+        background.WatchFromMenu(ctx.ChatId, ctx.MessageId, ctx.Ct);
         return CallbackResult.Handled;
     }
 }

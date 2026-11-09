@@ -26,7 +26,8 @@ public sealed record WorkGregMeta(
 
 /// <summary>
 /// The one door between a front end (the Telegram bot) and the job watcher. The bot talks only to this interface.
-/// Today an in-process implementation calls the services directly; step 4 adds an HTTP one.
+/// The bot process uses an HTTP implementation (calls the core's REST API); the core itself has an in-process one
+/// (calls the services directly) that its API endpoints share.
 /// Everything that can fail returns a <see cref="Result{T, TError}"/>. Profile results always carry the profile's sources
 /// (empty for a profile that was just created or removed).
 /// </summary>
@@ -72,12 +73,18 @@ public interface IWorkGregClient
     Task<int> CountStoredJobsAsync(long chatId, CancellationToken ct);
     Task<Result<int, Error>> ResendAllAsync(long chatId, CancellationToken ct);
 
-    /// <summary>Runs a check for this user and returns when it is over.</summary>
-    Task<Result<PollResult, Error>> CheckNowAsync(long chatId, CancellationToken ct);
+    /// <summary>
+    /// Starts a check for this user and returns at once. Busy when this user's own check or the hourly check is running.
+    /// Follow it with <see cref="GetCheckAsync"/> until <see cref="CheckStatusDto.Last"/> is set.
+    /// </summary>
+    Task<Result<Unit, Error>> StartCheckAsync(long chatId, CancellationToken ct);
 
-    /// <summary>What is running right now, from this user's point of view.</summary>
-    Task<RunStatus> GetCheckStatusAsync(long chatId, CancellationToken ct);
+    /// <summary>
+    /// What is running right now from this user's point of view, whether this user's check is waiting for its turn,
+    /// and how this user's last check ended (null while it is queued or running).
+    /// </summary>
+    Task<CheckStatusDto> GetCheckAsync(long chatId, CancellationToken ct);
 
-    /// <summary>Cancels the check this user started. Never touches anybody else's run.</summary>
+    /// <summary>Cancels the check this user started (running, or still waiting for its turn). Never touches anybody else's run.</summary>
     Task<StopOutcome> RequestStopAsync(long chatId, CancellationToken ct);
 }

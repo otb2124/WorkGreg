@@ -14,14 +14,14 @@ internal sealed class MenuCommand(MainScreen main) : IBotCommand
 }
 
 /// <summary>
-/// Starts a check and returns at once: the check runs in <see cref="BackgroundChecks"/>, so /stop can be read meanwhile.
+/// Starts a check and returns at once: the core runs it, <see cref="BackgroundChecks"/> watches it, so /stop can be read meanwhile.
 /// </summary>
 [Command("check", MenuText = "Check for new vacancies now", MenuOrder = 2)]
 internal sealed class CheckCommand(IWorkGregClient client, BackgroundChecks background) : IBotCommand
 {
     public async Task ExecuteAsync(CommandContext ctx)
     {
-        switch (await client.GetCheckStatusAsync(ctx.ChatId, ctx.Ct))
+        switch ((await client.GetCheckAsync(ctx.ChatId, ctx.Ct)).State)
         {
             case RunStatus.Yours:
                 await ctx.Io.ReplyAsync(ctx.ChatId, "A check is already running. Send /stop to cancel it.", ctx.Ct);
@@ -31,8 +31,12 @@ internal sealed class CheckCommand(IWorkGregClient client, BackgroundChecks back
                 return;
         }
 
-        await ctx.Io.ReplyAsync(ctx.ChatId, "⏳ Checking your sources… vacancies arrive as they are found. Send /stop to cancel.", ctx.Ct);
-        background.StartFromCommand(ctx.ChatId, ctx.Ct);
+        // Start is the authoritative answer (the status above can be stale by now): a refusal is shown as the error.
+        var start = await client.StartCheckAsync(ctx.ChatId, ctx.Ct);
+        await ctx.Io.ReplyAsync(ctx.ChatId,
+            Render(start, _ => "⏳ Checking your sources… vacancies arrive as they are found. Send /stop to cancel."), ctx.Ct);
+
+        if (start.IsSuccess) background.WatchFromCommand(ctx.ChatId, ctx.Ct);
     }
 }
 

@@ -21,7 +21,6 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\WorkGreg.Core\WorkGreg.Core.csproj" />
-		<ProjectReference Include="..\WorkGreg.Bot\WorkGreg.Bot.csproj" />
 	</ItemGroup>
 
 	<!-- SourceCatalog reads providers.json from the output folder. -->

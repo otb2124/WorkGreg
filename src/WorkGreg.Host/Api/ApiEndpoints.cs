@@ -220,8 +220,9 @@ public static class ApiEndpoints
             _ => Invalid($"'{field}' must be true or false.")
         };
 
+    /// <summary>Answers with the removed profile (its name is what a client shows in its confirmation).</summary>
     private static async Task<IResult> RemoveProfile(long chatId, int id, ProfileService profiles, CancellationToken ct) =>
-        (await profiles.RemoveAsync(chatId, id, ct)).ToHttp(_ => Results.NoContent());
+        (await profiles.RemoveAsync(chatId, id, ct)).ToHttp(p => Results.Ok(p.ToDto([])));
 
     // ---- Sources of a profile
 

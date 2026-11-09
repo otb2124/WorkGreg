@@ -6,14 +6,14 @@ namespace WorkGreg.Client;
 
 /// <summary>
 /// <see cref="IWorkGregClient"/> on top of the services in the same process. Scoped, like the services it wraps.
-/// Replaced by an HTTP client when the bot becomes its own process.
+/// The bot no longer uses it (it talks to the core over HTTP); the core's own API endpoints do.
 /// </summary>
 public sealed class InProcessWorkGregClient(
     ProfileService profiles,
     SourceService sources,
     SettingsService settings,
     JobService jobs,
-    PollRunner runner) : IWorkGregClient
+    ManualCheckTracker checks) : IWorkGregClient
 {
     // ---- catalog and limits
 
@@ -102,14 +102,14 @@ public sealed class InProcessWorkGregClient(
     public Task<Result<int, Error>> ResendAllAsync(long chatId, CancellationToken ct) =>
         jobs.ResendAllAsync(chatId, ct);
 
-    public Task<Result<PollResult, Error>> CheckNowAsync(long chatId, CancellationToken ct) =>
-        jobs.CheckNowAsync(chatId, ct);
+    public Task<Result<Unit, Error>> StartCheckAsync(long chatId, CancellationToken ct) =>
+        Task.FromResult(checks.Start(chatId));
 
-    public Task<RunStatus> GetCheckStatusAsync(long chatId, CancellationToken ct) =>
-        Task.FromResult(runner.StatusFor(chatId));
+    public Task<CheckStatusDto> GetCheckAsync(long chatId, CancellationToken ct) =>
+        Task.FromResult(checks.Get(chatId).ToDto());
 
     public Task<StopOutcome> RequestStopAsync(long chatId, CancellationToken ct) =>
-        Task.FromResult(runner.RequestStop(chatId));
+        Task.FromResult(checks.Stop(chatId));
 
     // ---- helpers
 

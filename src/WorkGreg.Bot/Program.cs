@@ -6,9 +6,9 @@ using WorkGreg.Services;
 namespace WorkGreg;
 
 /// <summary>
-/// Entry point of the Telegram bot as its own process. It knows nothing about the database or the fetchers:
-/// everything goes through <see cref="IWorkGregClient"/>.
-/// (An explicit class instead of top-level statements, so it can never clash with the Host's generated Program type.)
+/// Entry point of the Telegram bot as its own process. It knows nothing about the database or the fetchers: everything
+/// goes through <see cref="IWorkGregClient"/>, which here is an HTTP client of the core's REST API.
+/// (An explicit class instead of top-level statements, so it can never clash with another project's generated Program type.)
 /// </summary>
 internal static class BotProgram
 {
@@ -16,7 +16,7 @@ internal static class BotProgram
     {
         var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(args);
 
-        // Same secrets convention as the Host: secrets.json in the content root and next to the executable,
+        // Secrets (Bot:Token, Core:ApiKey, ...) live in secrets.json in the content root and next to the executable,
         // never committed; environment variables are added again afterwards so they still win.
         builder.Configuration
             .AddJsonFile(Path.Combine(builder.Environment.ContentRootPath, "secrets.json"), optional: true, reloadOnChange: false)
@@ -33,19 +33,22 @@ internal static class BotProgram
                 "Add chat ids, or set Bot:Access to Open.")
             .ValidateOnStart();
 
+        builder.Services.AddWorkGregHttpClient();   // IWorkGregClient -> the core's REST API (Core:BaseUrl, Core:ApiKey)
         builder.Services.AddTelegramBot();
-
-        // IWorkGregClient: the HTTP implementation is registered here in step 4 (e.g. services.AddWorkGregHttpClient(config)).
 
         var host = builder.Build();
 
-        // Fail at startup with a clear message instead of at the first Telegram update.
-        using (var scope = host.Services.CreateScope())
+        // Not fatal (the core may start a moment after the bot), but a wrong URL or key shows up here, not at the first message.
+        var log = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WorkGreg.Bot");
+        try
         {
-            if (scope.ServiceProvider.GetService<IWorkGregClient>() is null)
-                throw new InvalidOperationException(
-                    "No IWorkGregClient is registered. The standalone bot needs the HTTP client (step 4); " +
-                    "until then the bot runs inside WorkGreg.Host.");
+            using var scope = host.Services.CreateScope();
+            var meta = await scope.ServiceProvider.GetRequiredService<IWorkGregClient>().GetMetaAsync(CancellationToken.None);
+            log.LogInformation("The core is reachable: {Providers} sources, {Regions} regions", meta.Providers.Count, meta.Regions.Count);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "The core is not reachable (or rejected the key) yet. The bot keeps running; check Core:BaseUrl and Core:ApiKey.");
         }
 
         await host.RunAsync();

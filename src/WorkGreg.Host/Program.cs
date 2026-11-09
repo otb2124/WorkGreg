@@ -24,7 +24,6 @@ builder.Services
     .AddFetching()
     .AddApplicationServices()
     .AddTelegramNotifier()                     // core: outgoing vacancy messages
-    .AddTelegramBot()                          // bot project: in step 4 this moves to the bot's own Program.cs
     .AddPolling()
     .AddWorkGregApi(builder.Configuration);
 

@@ -10,11 +10,13 @@ namespace WorkGreg.Composition;
 public static class BotServiceCollectionExtensions
 {
     /// <summary>
-    /// Everything the Telegram front end needs. It expects IWorkGregClient and IOptions&lt;BotOptions&gt; to be registered
-    /// by whoever hosts it (today the Host, in step 4 the bot's own Program.cs).
+    /// Everything the Telegram front end needs. It expects IWorkGregClient (see AddWorkGregHttpClient) and
+    /// IOptions&lt;BotOptions&gt; to be registered by the bot's Program.cs.
     /// </summary>
     public static IServiceCollection AddTelegramBot(this IServiceCollection services)
     {
+        services.TryAddSingleton(TimeProvider.System);   // rate limiter and check polling
+
         services.TryAddSingleton<ITelegramBotClient>(sp =>
             new TelegramBotClient(sp.GetRequiredService<IOptions<BotOptions>>().Value.Token));
 
