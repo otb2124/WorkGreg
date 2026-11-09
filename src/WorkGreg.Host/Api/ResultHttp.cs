@@ -8,10 +8,17 @@ public static class ResultHttp
     public static IResult ToHttp<T>(this Result<T, Error> result, Func<T, IResult> ok) =>
         result.IsSuccess ? ok(result.Value) : result.Error.ToHttp();
 
-    public static IResult ToHttp(this Error error) => error.Kind switch
+    /// <summary>
+    /// The status code says the class of failure, the body says exactly which: <c>{ "kind": "Busy", "message": "..." }</c>
+    /// (kind is the <see cref="ErrorKind"/> name). Conflict and Busy share 409, so a client that must tell them apart
+    /// reads the kind. Every failed call that reaches a service has this body; 401 and 403 from the filters have none.
+    /// </summary>
+    public static IResult ToHttp(this Error error) => Results.Json(error, statusCode: StatusFor(error.Kind));
+
+    private static int StatusFor(ErrorKind kind) => kind switch
     {
-        ErrorKind.NotFound => Results.NotFound(),
-        ErrorKind.Conflict or ErrorKind.Busy => Results.Conflict(error.Message),
-        _ => Results.BadRequest(error.Message)
+        ErrorKind.NotFound => StatusCodes.Status404NotFound,
+        ErrorKind.Conflict or ErrorKind.Busy => StatusCodes.Status409Conflict,
+        _ => StatusCodes.Status400BadRequest
     };
 }

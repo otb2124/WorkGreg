@@ -1,4 +1,5 @@
 ﻿using WorkGreg.Domain;
+using WorkGreg.Services;
 
 namespace WorkGreg.Contracts;
 
@@ -79,4 +80,24 @@ public sealed record SummaryDto(
     int Profiles, int EnabledProfiles, int Sources, int EnabledSources, int FailingSources,
     int PendingJobs, int DeliveredJobs, bool Paused);
 
-public sealed record CheckResult(int Sent);
+/// <summary>How a manual check ended. Failed = it crashed or the app shut down; Sent is then not reliable.</summary>
+public sealed record CheckOutcomeDto(int Sent, bool Stopped, bool Failed, DateTime FinishedUtc);
+
+/// <summary>
+/// GET /check. State is what is running right now from this user's point of view. Queued = this user's check was
+/// started but waits for somebody else's run. Last is null while a check of this user is queued or running, and holds
+/// the result once it is over (it stays until this user starts the next check).
+/// </summary>
+public sealed record CheckStatusDto(RunStatus State, bool Queued, CheckOutcomeDto? Last);
+
+public sealed record StopCheckDto(StopOutcome Outcome);
+
+/// <summary>POST /resend: how many stored vacancies were marked as not yet sent.</summary>
+public sealed record ResendDto(int Reset);
+
+public sealed record JobCountDto(int Count);
+
+/// <summary>
+/// PATCH /settings. Change one thing per request: Paused, or Delivery (with DigestHourUtc, which Digest needs).
+/// </summary>
+public sealed record PatchSettingsRequest(bool? Paused, DeliveryMode? Delivery, int? DigestHourUtc);

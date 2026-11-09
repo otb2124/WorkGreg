@@ -115,6 +115,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SourceSyncService>();
         services.AddSingleton<DeliveryService>();
         services.AddSingleton<PollRunner>();
+        services.AddSingleton<ManualCheckTracker>();   // starts a user's check in the background for the HTTP API
         services.AddHostedService<PollingWorker>();
 
         services.AddSingleton<RetentionService>();

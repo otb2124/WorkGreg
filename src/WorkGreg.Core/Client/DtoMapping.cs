@@ -27,4 +27,8 @@ public static class DtoMapping
     public static ProviderDto ToDto(this ProviderInfo i) =>
         new(i.Provider.Id, i.Provider.Name, i.Provider.Type, i.IsAvailable,
             i.Provider.KeywordExamples, SourceCatalog.RegionsOf(i.Provider));
+
+    public static CheckOutcomeDto ToDto(this CheckOutcome o) => new(o.Sent, o.Stopped, o.Failed, o.FinishedUtc);
+
+    public static CheckStatusDto ToDto(this CheckState s) => new(s.Status, s.Queued, s.Last?.ToDto());
 }
