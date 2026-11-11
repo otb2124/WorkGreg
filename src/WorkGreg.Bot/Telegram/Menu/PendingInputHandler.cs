@@ -16,7 +16,7 @@ internal sealed class PendingInputHandler(
     ProfileScreen profileScreen,
     FiltersScreen filtersScreen)
 {
-    /// <summary>Returns null when nothing was waiting for an answer.</summary>
+    /// <summary>Returns null when nothing was waiting for an answer (or the prompt has expired).</summary>
     public async Task<TextResult?> HandleAsync(long chatId, string text, CancellationToken ct)
     {
         var pend = pending.Get(chatId);
@@ -49,6 +49,9 @@ internal sealed class PendingInputHandler(
         return new TextResult(pend.MessageId, screen);
     }
 
-    private async Task<TextResult> AskAgainAsync(long chatId, PendingInput pend, string notice, CancellationToken ct) =>
-        new(pend.MessageId, await promptScreen.RenderAsync(chatId, pend.Target, notice, ct));
+    private async Task<TextResult> AskAgainAsync(long chatId, PendingInput pend, string notice, CancellationToken ct)
+    {
+        pending.Set(chatId, pend);   // the question is asked again, so it gets a fresh time limit
+        return new(pend.MessageId, await promptScreen.RenderAsync(chatId, pend.Target, notice, ct));
+    }
 }

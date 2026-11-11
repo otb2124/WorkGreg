@@ -15,7 +15,7 @@ public static class CoreClientServiceCollectionExtensions
     /// <see cref="IWorkGregClient"/> over HTTP: base URL and key from <c>Core:BaseUrl</c> / <c>Core:ApiKey</c> (checked at
     /// startup), timeouts from the resilience handler. GET requests are retried on transient failures; POST/PATCH/DELETE
     /// are sent once, because a request whose answer was lost may well have been done already (a second "create profile"
-    /// would make a duplicate).
+    /// would make a duplicate). A third client, without retries, pings the core's /health for <see cref="CoreHealth"/>.
     /// </summary>
     public static IServiceCollection AddWorkGregHttpClient(this IServiceCollection services)
     {
@@ -61,6 +61,13 @@ public static class CoreClientServiceCollectionExtensions
                 o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(15);     // one try + a little slack
                 o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(30); // must be >= 2 x AttemptTimeout
             });
+
+        // Health pings: one quick try, no retries and no circuit breaker. A ping has to say what is true right now,
+        // and must not be refused because the breaker of the read/write clients is open.
+        services.AddHttpClient(CoreHealth.ClientName, Configure)
+            .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(5));
+        services.AddSingleton<CoreHealth>();
+        services.AddHostedService<CoreHealthMonitor>();
 
         services.AddTransient<IWorkGregClient>(sp =>
         {

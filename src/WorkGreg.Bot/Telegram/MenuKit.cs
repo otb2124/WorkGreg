@@ -18,13 +18,34 @@ public sealed record TextResult(int MessageId, Screen Screen);
 /// <summary>"I asked this chat for a value, the next plain text message is the answer."</summary>
 internal sealed record PendingInput(PromptTarget Target, int MessageId);
 
-/// <summary>In-memory only: after a restart the user just taps the button again.</summary>
-internal sealed class PendingInputStore
+/// <summary>
+/// In-memory only: after a restart the user just taps the button again. A prompt also expires after <see cref="Ttl"/>,
+/// so a stray message hours later is not swallowed as the answer to a question nobody remembers.
+/// </summary>
+internal sealed class PendingInputStore(TimeProvider? time = null)
 {
-    private readonly ConcurrentDictionary<long, PendingInput> _items = new();
+    /// <summary>How long a prompt waits for its answer. Asking again (or re-asking after a validation error) restarts it.</summary>
+    public static readonly TimeSpan Ttl = TimeSpan.FromMinutes(10);
 
-    public void Set(long chatId, PendingInput input) => _items[chatId] = input;
-    public PendingInput? Get(long chatId) => _items.TryGetValue(chatId, out var p) ? p : null;
+    private readonly record struct Entry(PendingInput Input, DateTimeOffset ExpiresUtc);
+
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private readonly ConcurrentDictionary<long, Entry> _items = new();
+
+    public void Set(long chatId, PendingInput input) =>
+        _items[chatId] = new Entry(input, _time.GetUtcNow() + Ttl);
+
+    /// <summary>The prompt this chat is being asked, or null when there is none or it has expired.</summary>
+    public PendingInput? Get(long chatId)
+    {
+        if (!_items.TryGetValue(chatId, out var entry)) return null;
+        if (_time.GetUtcNow() < entry.ExpiresUtc) return entry.Input;
+
+        // Expired. Remove exactly this entry, so a prompt set a moment ago by another update is not thrown away.
+        _items.TryRemove(new KeyValuePair<long, Entry>(chatId, entry));
+        return null;
+    }
+
     public void Clear(long chatId) => _items.TryRemove(chatId, out _);
 }
 

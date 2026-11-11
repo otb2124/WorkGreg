@@ -36,10 +36,13 @@ CatalogValidator.RequireFetchers(
 
 using (var scope = app.Services.CreateScope())
 {
-    scope.ServiceProvider.GetRequiredService<AppDb>().Database.Migrate();
+    var db = scope.ServiceProvider.GetRequiredService<AppDb>();
+    db.Database.Migrate();
+    await db.EnableWalAsync(app.Logger);   // polling and API writes overlap: readers must not wait for the writer
 }
 
 app.UseCors();
+app.MapHealth();   // GET /health, no API key
 app.MapApi();
 
 await app.RunAsync();

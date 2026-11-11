@@ -22,6 +22,9 @@ public sealed class DeliveryService(
     TimeProvider time,
     ILogger<DeliveryService> log)
 {
+    // Keeps the IN (...) lookup well under SQLite's parameter limits (same size SourceSyncService uses).
+    private const int HashLookupBatchSize = 500;
+
     /// <summary>
     /// <see cref="DeliverAsync"/> with the owner's problems contained: whatever goes wrong while talking to
     /// this one chat, the cycle goes on with the other owners.
@@ -79,7 +82,9 @@ public sealed class DeliveryService(
     private async Task<DeliveryResult> DeliverInstantAsync(
         AppDb db, long owner, int budget, int? onlySourceId, CancellationToken ct)
     {
+        var loadStarted = time.GetTimestamp();
         var pending = await LoadPendingAsync(db, owner, onlySourceId, ct);
+        var loadTime = time.GetElapsedTime(loadStarted);
 
         var sent = 0;
         var waiting = 0;
@@ -89,7 +94,7 @@ public sealed class DeliveryService(
         foreach (var delivery in pending.Deliveries)
         {
             var job = delivery.Job;
-            var (verdict, source, profile, criteria) = await ClassifyAsync(db, owner, pending, delivery, null, ct);
+            var (verdict, source, profile, criteria) = Classify(pending, delivery, null);
 
             if (verdict == Verdict.Filtered) { filteredOut++; continue; }
             if (verdict == Verdict.Duplicate) { duplicates++; continue; }
@@ -121,6 +126,10 @@ public sealed class DeliveryService(
             delivery.Delivered = true;
             sent++;
 
+            // The same vacancy later in this pass (another board, another profile) is now a duplicate. The database
+            // is not asked again: the set loaded at the start of the pass is kept up to date here instead.
+            pending.DeliveredHashes.Add(job.Hash);
+
             await db.SaveChangesAsync(ct); // save per message so a crash never causes duplicates
 
             var gap = options.Value.SendDelayMilliseconds;
@@ -131,8 +140,8 @@ public sealed class DeliveryService(
 
         if (pending.Deliveries.Count > 0)
             log.LogInformation(
-                "Delivery for {Owner}: {Pending} pending, {Sent} sent, {Filtered} dropped by the profile's filters (Include/Exclude/Companies/Locations/Salary/Remote), {Duplicates} duplicates, {Waiting} waiting for the limit",
-                owner, pending.Deliveries.Count, sent, filteredOut, duplicates, waiting);
+                "Delivery for {Owner}: {Pending} pending (loaded in {LoadMs:0} ms), {Sent} sent, {Filtered} dropped by the profile's filters (Include/Exclude/Companies/Locations/Salary/Remote), {Duplicates} duplicates, {Waiting} waiting for the limit",
+                owner, pending.Deliveries.Count, loadTime.TotalMilliseconds, sent, filteredOut, duplicates, waiting);
 
         return new DeliveryResult(sent, waiting, filteredOut, duplicates);
     }
@@ -157,8 +166,8 @@ public sealed class DeliveryService(
         foreach (var delivery in pending.Deliveries)
         {
             // Nothing is marked delivered until the digest is sent, so the same vacancy twice in this batch
-            // (two boards, two profiles) has to be caught here as well as in the database.
-            var (verdict, source, profile, _) = await ClassifyAsync(db, owner, pending, delivery, hashesInDigest, ct);
+            // (two boards, two profiles) has to be caught here as well as against what was sent before.
+            var (verdict, source, profile, _) = Classify(pending, delivery, hashesInDigest);
 
             if (verdict == Verdict.Filtered) { filteredOut++; continue; }
             if (verdict == Verdict.Duplicate) { duplicates++; continue; }
@@ -208,15 +217,21 @@ public sealed class DeliveryService(
 
     // ---- shared
 
+    /// <param name="DeliveredHashes">
+    /// Hashes (company + title, on any board or profile) this owner has already been sent, for the vacancies in
+    /// <paramref name="Deliveries"/>. Loaded once per pass; instant mode adds to it as it sends.
+    /// </param>
     private sealed record PendingJobs(
         IReadOnlyDictionary<int, Source> Sources,
         IReadOnlyDictionary<int, SearchProfile> Profiles,
         IReadOnlyDictionary<int, ProfileCriteria> Criteria,
-        List<JobDelivery> Deliveries);
+        List<JobDelivery> Deliveries,
+        HashSet<string> DeliveredHashes);
 
     /// <summary>
     /// The owner's unprocessed deliveries (of one source, or all) with their vacancies, newest first, for enabled profiles only.
     /// "Newest" is the posting date, or when this owner's source first stored it for undated postings.
+    /// Also loads, in the same step, which of those vacancies this owner already received (see <see cref="LoadDeliveredHashesAsync"/>).
     /// </summary>
     private static async Task<PendingJobs> LoadPendingAsync(AppDb db, long owner, int? onlySourceId, CancellationToken ct)
     {
@@ -239,7 +254,32 @@ public sealed class DeliveryService(
             .Where(d => sources.TryGetValue(d.SourceId, out var s) && profiles.ContainsKey(s.SearchProfileId))
             .ToList();
 
-        return new PendingJobs(sources, profiles, criteria, deliveries);
+        var delivered = await LoadDeliveredHashesAsync(db, owner, deliveries.Select(d => d.Job.Hash), ct);
+
+        return new PendingJobs(sources, profiles, criteria, deliveries, delivered);
+    }
+
+    /// <summary>
+    /// Which of these hashes were already sent to this owner (same company + title, on any board or profile)?
+    /// One <c>Hash IN (...)</c> query per chunk of <see cref="HashLookupBatchSize"/>, instead of one query per vacancy.
+    /// </summary>
+    private static async Task<HashSet<string>> LoadDeliveredHashesAsync(
+        AppDb db, long owner, IEnumerable<string> hashes, CancellationToken ct)
+    {
+        var delivered = new HashSet<string>();
+
+        foreach (var batch in hashes.Distinct().Chunk(HashLookupBatchSize))
+        {
+            var found = await db.JobDeliveries
+                .Where(d => d.OwnerChatId == owner && d.Delivered && batch.Contains(d.Job.Hash))
+                .Select(d => d.Job.Hash)
+                .Distinct()
+                .ToListAsync(ct);
+
+            delivered.UnionWith(found);
+        }
+
+        return delivered;
     }
 
     private enum Verdict { Deliver, Filtered, Duplicate }
@@ -250,11 +290,12 @@ public sealed class DeliveryService(
     /// The step instant and digest delivery have in common: does this vacancy match its profile's filters, and was it
     /// already sent? A vacancy that is filtered out or a duplicate is marked processed here (nothing more to do with it);
     /// a <see cref="Verdict.Deliver"/> one is left alone for the caller to send or keep waiting.
+    /// "Already sent" is answered from <see cref="PendingJobs.DeliveredHashes"/>, with no database call.
     /// <paramref name="seenInBatch"/> is only for a mode that sends many vacancies in one message (the digest): a hash
-    /// already in it counts as a duplicate too. Instant mode passes null, because it saves each message as it goes.
+    /// already in it counts as a duplicate too. Instant mode passes null and keeps <see cref="PendingJobs.DeliveredHashes"/>
+    /// current as it sends each message.
     /// </summary>
-    private static async Task<Classified> ClassifyAsync(
-        AppDb db, long owner, PendingJobs pending, JobDelivery delivery, ISet<string>? seenInBatch, CancellationToken ct)
+    private static Classified Classify(PendingJobs pending, JobDelivery delivery, ISet<string>? seenInBatch)
     {
         var job = delivery.Job;
         var source = pending.Sources[delivery.SourceId];
@@ -267,7 +308,7 @@ public sealed class DeliveryService(
             return new Classified(Verdict.Filtered, source, profile, criteria);
         }
 
-        if (await AlreadyDeliveredAsync(db, owner, job.Hash, ct) || (seenInBatch is not null && !seenInBatch.Add(job.Hash)))
+        if (pending.DeliveredHashes.Contains(job.Hash) || (seenInBatch is not null && !seenInBatch.Add(job.Hash)))
         {
             delivery.Processed = true;
             return new Classified(Verdict.Duplicate, source, profile, criteria);
@@ -275,8 +316,4 @@ public sealed class DeliveryService(
 
         return new Classified(Verdict.Deliver, source, profile, criteria);
     }
-
-    /// <summary>Was a vacancy with this hash (same company + title, on any board or profile) already sent to this owner?</summary>
-    private static Task<bool> AlreadyDeliveredAsync(AppDb db, long owner, string hash, CancellationToken ct) =>
-        db.JobDeliveries.AnyAsync(d => d.OwnerChatId == owner && d.Delivered && d.Job.Hash == hash, ct);
 }

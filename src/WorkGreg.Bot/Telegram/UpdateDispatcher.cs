@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Options;
+using WorkGreg.Client;
 using WorkGreg.Services;
 using WorkGreg.Telegram.Menu;
 using global::Telegram.Bot;
@@ -21,13 +22,24 @@ internal sealed class UpdateDispatcher(
     CallbackRouter callbacks,
     ChatRateLimiter limiter,
     PendingInputStore pending,
+    CoreHealth health,
     IBotIo io,
     ILogger<UpdateDispatcher> log) : IUpdateHandler
 {
     private const string Failed = "Something went wrong, check the logs.";
+    private const string Unavailable = "⚠️ Service temporarily unavailable. Please try again in a minute.";
 
     public async Task HandleUpdateAsync(ITelegramBotClient client, Update update, CancellationToken ct)
     {
+        // Every log line written while this update is handled (here, in commands, in screens) carries both ids.
+        // Needs "Logging:Console:IncludeScopes": true to show up in the console output.
+        var chatId = update.Message?.Chat.Id ?? update.CallbackQuery?.Message?.Chat.Id;
+        using var scope = log.BeginScope(new Dictionary<string, object?>
+        {
+            ["ChatId"] = chatId,
+            ["UpdateId"] = update.Id
+        });
+
         try
         {
             if (update.CallbackQuery is { } cq)
@@ -39,7 +51,8 @@ internal sealed class UpdateDispatcher(
         // exception, and it must not be rethrown into the receiver loop.
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            log.LogError(ex, "Update {UpdateId} failed", update.Id);
+            var reply = FailureReply(ex, $"Update {update.Id}");
+            await TryNotifyAsync(update, reply, ct);
         }
     }
 
@@ -47,6 +60,43 @@ internal sealed class UpdateDispatcher(
     {
         log.LogError(exception, "Telegram error from {Source}", source);
         return Task.CompletedTask;
+    }
+
+    // ------------------------------------------------------------------ failures
+
+    /// <summary>Logs a failure and picks the text the user sees: "temporarily unavailable" when the core is down, else the generic one.</summary>
+    private string FailureReply(Exception ex, string what)
+    {
+        if (CoreOutage.IsOutage(ex))
+        {
+            health.NoteUnreachable(ex.Message);   // the monitor flips it back as soon as /health answers again
+            log.LogWarning("{What}: the core is unavailable ({Reason})", what, ex.Message);
+            return Unavailable;
+        }
+
+        log.LogError(ex, "{What} failed", what);
+        return Failed;
+    }
+
+    /// <summary>Best effort, for a failure nobody inside the handlers caught: the user should not be left with silence.</summary>
+    private async Task TryNotifyAsync(Update update, string text, CancellationToken ct)
+    {
+        try
+        {
+            if (update.CallbackQuery is { } cq)
+            {
+                if (cq.Message is { } m && options.Value.IsAllowed(m.Chat.Id))
+                    await io.AnswerCallbackAsync(cq.Id, text, ct);
+            }
+            else if (update.Message is { } message && options.Value.IsAllowed(message.Chat.Id))
+            {
+                await io.ReplyAsync(message.Chat.Id, text, ct);
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            log.LogDebug(ex, "Could not tell the chat about the failure");
+        }
     }
 
     // ------------------------------------------------------------------ text messages
@@ -97,8 +147,7 @@ internal sealed class UpdateDispatcher(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            log.LogError(ex, "Command failed: {Text}", text);
-            await io.ReplyAsync(chatId, Failed, ct);
+            await io.ReplyAsync(chatId, FailureReply(ex, $"Command {text}"), ct);
         }
     }
 
@@ -115,9 +164,9 @@ internal sealed class UpdateDispatcher(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            log.LogError(ex, "Text input failed: {Text}", text);
-            pending.Clear(chatId);
-            await io.ReplyAsync(chatId, Failed, ct);
+            // When the core is down the answer was not saved, so the prompt stays and the user can simply send it again.
+            if (!CoreOutage.IsOutage(ex)) pending.Clear(chatId);
+            await io.ReplyAsync(chatId, FailureReply(ex, $"Text input {text}"), ct);
             return;
         }
 
@@ -173,8 +222,8 @@ internal sealed class UpdateDispatcher(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            log.LogError(ex, "Callback failed: {Data}", data);
-            await io.AnswerCallbackAsync(cq.Id, Failed, ct);   // no-op if the handler already answered
+            // No-op if the handler already answered the tap.
+            await io.AnswerCallbackAsync(cq.Id, FailureReply(ex, $"Callback {data}"), ct);
         }
     }
 
