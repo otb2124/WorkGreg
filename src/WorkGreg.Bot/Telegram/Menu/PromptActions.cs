@@ -1,4 +1,4 @@
-﻿using WorkGreg.Client;
+using WorkGreg.Client;
 
 namespace WorkGreg.Telegram.Menu;
 
@@ -30,14 +30,8 @@ internal sealed class ClearHandler(IWorkGregClient client, PendingInputStore pen
         var (kind, id) = ctx.Data.Prompt!.Value;
 
         // Clearing can only fail when the profile is gone; the filters page then shows "No such profile."
-        switch (kind)
-        {
-            case PromptKind.Include: await client.SetIncludeAsync(ctx.ChatId, id, null, ctx.Ct); break;
-            case PromptKind.Exclude: await client.SetExcludeAsync(ctx.ChatId, id, null, ctx.Ct); break;
-            case PromptKind.Companies: await client.SetCompaniesAsync(ctx.ChatId, id, null, ctx.Ct); break;
-            case PromptKind.Locations: await client.SetLocationsAsync(ctx.ChatId, id, null, ctx.Ct); break;
-            case PromptKind.MinSalary: await client.SetMinSalaryAsync(ctx.ChatId, id, null, ctx.Ct); break;
-        }
+        var spec = PromptSpecs.Of(kind);
+        if (spec.Clearable) await spec.Save(client, ctx.ChatId, id, null, ctx.Ct);
 
         var screen = await filtersScreen.RenderAsync(ctx.ChatId, id, null, ctx.Ct);
         return CallbackResult.Show(screen with { Toast = "Cleared" });

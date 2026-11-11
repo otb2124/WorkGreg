@@ -32,7 +32,7 @@ public sealed class SettingsService(AppDb db, TimeProvider time)
         long chatId, DeliveryMode mode, int? digestHourUtc, CancellationToken ct)
     {
         if (mode == DeliveryMode.Digest && digestHourUtc is null or < 0 or > LastHour)
-            return Error.Validation($"The digest hour must be between 0 and {LastHour} (UTC).");
+            return Errors.DigestHourInvalid(LastHour);
 
         var settings = await LoadOrCreateAsync(chatId, ct);
         var hour = mode == DeliveryMode.Digest ? digestHourUtc!.Value : settings.DigestHourUtc;

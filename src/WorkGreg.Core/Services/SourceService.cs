@@ -15,13 +15,15 @@ public sealed record FetchTypeInfo(FetchType Type, bool IsAvailable);
 
 /// <summary>
 /// Use cases for the sources (job boards) attached to a profile.
-/// Used by the Telegram bot and the HTTP API. Error messages are plain text.
+/// Used by the Telegram bot and the HTTP API. Failures are <see cref="Errors"/> (a stable code plus a plain English message).
+///
+/// Provider ids: <see cref="Source.Provider"/> is always stored in the catalog's form (lower case, see
+/// <see cref="ProfileRules.NewSource"/>), and every id typed by a user goes through
+/// <see cref="ProfileRules.NormalizeProviderId"/> before it is compared, so add, remove and toggle all agree
+/// and the queries compare with a plain "=" (which can use an index).
 /// </summary>
 public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
 {
-    private static readonly Error ProfileNotFound = Error.NotFound("No such profile.");
-    private static readonly Error SourceNotFound = Error.NotFound("That source is not part of this profile.");
-
     // ---- catalog (not per user)
 
     public IReadOnlyList<FetchTypeInfo> FetchTypes() =>
@@ -40,18 +42,20 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
         long chatId, int profileId, string? providerId, CancellationToken ct)
     {
         var profile = await FindProfileAsync(chatId, profileId, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
-        var provider = SourceCatalog.Find(providerId);
+        var provider = SourceCatalog.Find(ProfileRules.NormalizeProviderId(providerId));
         if (provider is null)
-            return Error.Validation(
-                $"Unknown source '{providerId}'. Available: {string.Join(", ", SourceCatalog.All.Select(p => p.Id))}.");
+            return Errors.UnknownSource(
+                (providerId ?? "").Trim(),
+                string.Join(", ", SourceCatalog.All.Select(p => p.Id)));
 
         if (!fetchers.Get(provider.Type).IsAvailable)
-            return Error.Validation($"{provider.Name} is planned but not implemented yet.");
+            return Errors.SourceNotImplemented(provider.Name);
 
-        var exists = await db.Sources.AnyAsync(s => s.SearchProfileId == profileId && s.Provider == provider.Id, ct);
-        if (exists) return Error.Conflict($"{provider.Name} is already a source of this profile.");
+        var stored = provider.Id.ToLowerInvariant();
+        var exists = await db.Sources.AnyAsync(s => s.SearchProfileId == profileId && s.Provider == stored, ct);
+        if (exists) return Errors.SourceAlreadyAdded(provider.Name);
 
         var source = ProfileRules.NewSource(profile, provider);
         db.Sources.Add(source);
@@ -67,26 +71,26 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
         long chatId, int profileId, int sourceId, CancellationToken ct)
     {
         var profile = await FindProfileAsync(chatId, profileId, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
         var source = await db.Sources.FirstOrDefaultAsync(
             s => s.Id == sourceId && s.SearchProfileId == profileId, ct);
-        if (source is null) return SourceNotFound;
+        if (source is null) return Errors.SourceNotInProfile;
 
         return await RemoveCoreAsync(profile, source, ct);
     }
 
-    /// <summary>Removes by provider id, case-insensitive (the bot addresses sources like this).</summary>
+    /// <summary>Removes by provider id, whatever case the caller typed (the bot addresses sources like this).</summary>
     public async Task<Result<SourceChange, Error>> RemoveByProviderAsync(
         long chatId, int profileId, string? providerId, CancellationToken ct)
     {
         var profile = await FindProfileAsync(chatId, profileId, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
-        var wanted = (providerId ?? "").Trim().ToLowerInvariant();
+        var wanted = ProfileRules.NormalizeProviderId(providerId);
         var source = await db.Sources.FirstOrDefaultAsync(
-            s => s.SearchProfileId == profileId && s.Provider != null && s.Provider.ToLower() == wanted, ct);
-        if (source is null) return SourceNotFound;
+            s => s.SearchProfileId == profileId && s.Provider == wanted, ct);
+        if (source is null) return Errors.SourceNotInProfile;
 
         return await RemoveCoreAsync(profile, source, ct);
     }
@@ -97,10 +101,12 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
     public async Task<Result<SourceChange, Error>> ToggleAsync(
         long chatId, int profileId, string providerId, CancellationToken ct)
     {
-        var attached = await db.Sources.AnyAsync(s => s.SearchProfileId == profileId && s.Provider == providerId, ct);
+        var wanted = ProfileRules.NormalizeProviderId(providerId);
+
+        var attached = await db.Sources.AnyAsync(s => s.SearchProfileId == profileId && s.Provider == wanted, ct);
         return attached
-            ? await RemoveByProviderAsync(chatId, profileId, providerId, ct)
-            : await AddAsync(chatId, profileId, providerId, ct);
+            ? await RemoveByProviderAsync(chatId, profileId, wanted, ct)
+            : await AddAsync(chatId, profileId, wanted, ct);
     }
 
     /// <summary>Null fields are left unchanged.</summary>
@@ -109,7 +115,7 @@ public sealed class SourceService(AppDb db, FetcherRegistry fetchers)
     {
         var source = await db.Sources.FirstOrDefaultAsync(
             s => s.Id == sourceId && s.SearchProfileId == profileId && s.SearchProfile.OwnerChatId == chatId, ct);
-        if (source is null) return SourceNotFound;
+        if (source is null) return Errors.SourceNotInProfile;
 
         if (enabled is { } value) source.Enabled = value;
 

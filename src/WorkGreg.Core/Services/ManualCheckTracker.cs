@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Hosting;
 
 namespace WorkGreg.Services;
@@ -45,9 +45,9 @@ public sealed class ManualCheckTracker(
         switch (runner.StatusFor(chatId))
         {
             case RunStatus.Yours:
-                return Error.Busy("A check is already running.");
+                return Errors.CheckAlreadyRunning;
             case RunStatus.Scheduled:
-                return Error.Busy("The hourly check is running right now.");
+                return Errors.HourlyCheckRunning;
         }
 
         // Linked to app shutdown, so the background run never outlives the host.
@@ -57,7 +57,7 @@ public sealed class ManualCheckTracker(
         if (!_pending.TryAdd(chatId, pending))
         {
             pending.Cts.Dispose();
-            return Error.Busy("A check is already running.");
+            return Errors.CheckAlreadyRunning;
         }
 
         _last.TryRemove(chatId, out _);

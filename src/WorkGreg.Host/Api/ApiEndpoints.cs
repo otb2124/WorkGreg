@@ -91,10 +91,10 @@ public static class ApiEndpoints
         long chatId, PatchSettingsRequest req, IWorkGregClient client, CancellationToken ct)
     {
         if (req.Delivery is null && req.DigestHourUtc is not null)
-            return Error.Validation("digestHourUtc only goes together with delivery.").ToHttp();
+            return Errors.InvalidRequest("digestHourUtc only goes together with delivery.").ToHttp();
 
         if (req.Paused is not null && req.Delivery is not null)
-            return Error.Validation("Change one setting per PATCH: paused, or delivery. Use PUT to replace everything.").ToHttp();
+            return Errors.InvalidRequest("Change one setting per PATCH: paused, or delivery. Use PUT to replace everything.").ToHttp();
 
         if (req.Paused is { } paused)
             return (await client.SetPausedAsync(chatId, paused, ct)).ToHttp(Results.Ok);
@@ -102,7 +102,7 @@ public static class ApiEndpoints
         if (req.Delivery is { } delivery)
             return (await client.SetDeliveryAsync(chatId, delivery, req.DigestHourUtc, ct)).ToHttp(Results.Ok);
 
-        return Error.Validation("Send paused, or delivery.").ToHttp();
+        return Errors.InvalidRequest("Send paused, or delivery.").ToHttp();
     }
 
     // ---- Profiles
@@ -134,11 +134,11 @@ public static class ApiEndpoints
         long chatId, int id, JsonElement body, IWorkGregClient client, CancellationToken ct)
     {
         if (body.ValueKind != JsonValueKind.Object)
-            return Error.Validation($"Send a JSON object with exactly one field ({PatchableFields}).").ToHttp();
+            return Errors.InvalidRequest($"Send a JSON object with exactly one field ({PatchableFields}).").ToHttp();
 
         var fields = body.EnumerateObject().ToList();
         if (fields.Count != 1)
-            return Error.Validation(
+            return Errors.InvalidRequest(
                 $"Send exactly one field per PATCH ({PatchableFields}). Use PUT to change several at once.").ToHttp();
 
         var (name, value) = (fields[0].Name, fields[0].Value);
@@ -161,7 +161,7 @@ public static class ApiEndpoints
     }
 
     private static Task<Result<ProfileDto, Error>> Invalid(string message) =>
-        Task.FromResult<Result<ProfileDto, Error>>(Error.Validation(message));
+        Task.FromResult<Result<ProfileDto, Error>>(Errors.InvalidRequest(message));
 
     /// <summary>A string, or null (the setter decides whether null is acceptable).</summary>
     private static Task<Result<ProfileDto, Error>> WithText(

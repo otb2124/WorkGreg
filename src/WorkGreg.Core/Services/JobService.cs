@@ -141,9 +141,9 @@ public sealed class JobService(AppDb db, PollRunner runner)
         switch (runner.StatusFor(chatId))
         {
             case RunStatus.Yours:
-                return Error.Busy("A check is already running.");
+                return Errors.CheckAlreadyRunning;
             case RunStatus.Scheduled:
-                return Error.Busy("The hourly check is running right now.");
+                return Errors.HourlyCheckRunning;
         }
 
         return await runner.RunAsync(chatId, ct);

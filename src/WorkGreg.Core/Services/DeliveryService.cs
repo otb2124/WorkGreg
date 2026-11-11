@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using WorkGreg.Data;
 using WorkGreg.Domain;
@@ -89,23 +89,10 @@ public sealed class DeliveryService(
         foreach (var delivery in pending.Deliveries)
         {
             var job = delivery.Job;
-            var source = pending.Sources[delivery.SourceId];
-            var profile = pending.Profiles[source.SearchProfileId];
-            var criteria = pending.Criteria[profile.Id];
+            var (verdict, source, profile, criteria) = await ClassifyAsync(db, owner, pending, delivery, null, ct);
 
-            if (!criteria.Matches(job))
-            {
-                delivery.Processed = true;
-                filteredOut++;
-                continue;
-            }
-
-            if (await AlreadyDeliveredAsync(db, owner, job.Hash, ct))
-            {
-                delivery.Processed = true;
-                duplicates++;
-                continue;
-            }
+            if (verdict == Verdict.Filtered) { filteredOut++; continue; }
+            if (verdict == Verdict.Duplicate) { duplicates++; continue; }
 
             // Limit reached: keep it pending for the next run, but keep going so the remaining ones are filtered and counted.
             if (sent >= budget)
@@ -169,27 +156,14 @@ public sealed class DeliveryService(
 
         foreach (var delivery in pending.Deliveries)
         {
-            var job = delivery.Job;
-            var source = pending.Sources[delivery.SourceId];
-            var profile = pending.Profiles[source.SearchProfileId];
-
-            if (!pending.Criteria[profile.Id].Matches(job))
-            {
-                delivery.Processed = true;
-                filteredOut++;
-                continue;
-            }
-
             // Nothing is marked delivered until the digest is sent, so the same vacancy twice in this batch
             // (two boards, two profiles) has to be caught here as well as in the database.
-            if (await AlreadyDeliveredAsync(db, owner, job.Hash, ct) || !hashesInDigest.Add(job.Hash))
-            {
-                delivery.Processed = true;
-                duplicates++;
-                continue;
-            }
+            var (verdict, source, profile, _) = await ClassifyAsync(db, owner, pending, delivery, hashesInDigest, ct);
 
-            candidates.Add((delivery, new DigestItem(job, source.Name, profile.Name)));
+            if (verdict == Verdict.Filtered) { filteredOut++; continue; }
+            if (verdict == Verdict.Duplicate) { duplicates++; continue; }
+
+            candidates.Add((delivery, new DigestItem(delivery.Job, source.Name, profile.Name)));
         }
 
         if (candidates.Count == 0)
@@ -266,6 +240,40 @@ public sealed class DeliveryService(
             .ToList();
 
         return new PendingJobs(sources, profiles, criteria, deliveries);
+    }
+
+    private enum Verdict { Deliver, Filtered, Duplicate }
+
+    private readonly record struct Classified(Verdict Verdict, Source Source, SearchProfile Profile, ProfileCriteria Criteria);
+
+    /// <summary>
+    /// The step instant and digest delivery have in common: does this vacancy match its profile's filters, and was it
+    /// already sent? A vacancy that is filtered out or a duplicate is marked processed here (nothing more to do with it);
+    /// a <see cref="Verdict.Deliver"/> one is left alone for the caller to send or keep waiting.
+    /// <paramref name="seenInBatch"/> is only for a mode that sends many vacancies in one message (the digest): a hash
+    /// already in it counts as a duplicate too. Instant mode passes null, because it saves each message as it goes.
+    /// </summary>
+    private static async Task<Classified> ClassifyAsync(
+        AppDb db, long owner, PendingJobs pending, JobDelivery delivery, ISet<string>? seenInBatch, CancellationToken ct)
+    {
+        var job = delivery.Job;
+        var source = pending.Sources[delivery.SourceId];
+        var profile = pending.Profiles[source.SearchProfileId];
+        var criteria = pending.Criteria[profile.Id];
+
+        if (!criteria.Matches(job))
+        {
+            delivery.Processed = true;
+            return new Classified(Verdict.Filtered, source, profile, criteria);
+        }
+
+        if (await AlreadyDeliveredAsync(db, owner, job.Hash, ct) || (seenInBatch is not null && !seenInBatch.Add(job.Hash)))
+        {
+            delivery.Processed = true;
+            return new Classified(Verdict.Duplicate, source, profile, criteria);
+        }
+
+        return new Classified(Verdict.Deliver, source, profile, criteria);
     }
 
     /// <summary>Was a vacancy with this hash (same company + title, on any board or profile) already sent to this owner?</summary>

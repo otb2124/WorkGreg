@@ -21,13 +21,11 @@ public sealed record ProfileDetails(SearchProfile Profile, IReadOnlyList<Source>
 
 /// <summary>
 /// Use cases for <see cref="SearchProfile"/>: validation, ownership checks, persistence.
-/// Used by the Telegram bot and the HTTP API. Error messages are plain text.
+/// Used by the Telegram bot and the HTTP API. Failures are <see cref="Errors"/> (a stable code plus a plain English message).
 /// Reads that cannot fail return plain values; everything that can fail returns a <see cref="Result{T, TError}"/>.
 /// </summary>
 public sealed class ProfileService(AppDb db)
 {
-    private static readonly Error ProfileNotFound = Error.NotFound("No such profile.");
-
     // ---- reads
 
     public async Task<IReadOnlyList<ProfileDetails>> ListAsync(long chatId, CancellationToken ct)
@@ -50,7 +48,7 @@ public sealed class ProfileService(AppDb db)
     {
         var profile = await db.SearchProfiles.AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == id && p.OwnerChatId == chatId, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
         var sources = await db.Sources.AsNoTracking()
             .Where(s => s.SearchProfileId == id)
@@ -69,7 +67,7 @@ public sealed class ProfileService(AppDb db)
 
         var count = await db.SearchProfiles.CountAsync(p => p.OwnerChatId == chatId, ct);
         if (count >= ProfileRules.MaxProfilesPerUser)
-            return Error.Validation($"Profile limit reached ({ProfileRules.MaxProfilesPerUser}).");
+            return Errors.ProfileLimitReached(ProfileRules.MaxProfilesPerUser);
 
         var profile = new SearchProfile { OwnerChatId = chatId };
         Apply(profile, draft, valid.Value.Name, valid.Value.Keyword);
@@ -84,7 +82,7 @@ public sealed class ProfileService(AppDb db)
         long chatId, int id, ProfileDraft draft, CancellationToken ct)
     {
         var profile = await FindOwnedAsync(chatId, id, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
         var valid = Validate(draft);
         if (valid.IsFailure) return valid.Error;
@@ -103,7 +101,7 @@ public sealed class ProfileService(AppDb db)
     public async Task<Result<SearchProfile, Error>> RemoveAsync(long chatId, int id, CancellationToken ct)
     {
         var profile = await FindOwnedAsync(chatId, id, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
         db.SearchProfiles.Remove(profile);
         await db.SaveChangesAsync(ct);
@@ -129,7 +127,7 @@ public sealed class ProfileService(AppDb db)
         if (keyword is null) return KeywordError();
 
         var profile = await FindOwnedAsync(chatId, id, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
         var sources = await db.Sources.Where(s => s.SearchProfileId == id).ToListAsync(ct);
         ProfileRules.ApplyKeyword(profile, keyword, sources);
@@ -158,7 +156,7 @@ public sealed class ProfileService(AppDb db)
     /// <summary>Null clears the minimum salary; anything else must be positive.</summary>
     public Task<Result<SearchProfile, Error>> SetMinSalaryAsync(long chatId, int id, int? salary, CancellationToken ct) =>
         salary is <= 0
-            ? Task.FromResult<Result<SearchProfile, Error>>(Error.Validation("The minimum salary must be a positive number."))
+            ? Task.FromResult<Result<SearchProfile, Error>>(Errors.MinSalaryInvalid)
             : UpdateAsync(chatId, id, p => p.MinSalary = salary, ct);
 
     public Task<Result<SearchProfile, Error>> SetRemoteOnlyAsync(long chatId, int id, bool remoteOnly, CancellationToken ct) =>
@@ -173,7 +171,7 @@ public sealed class ProfileService(AppDb db)
         long chatId, int id, Action<SearchProfile> change, CancellationToken ct)
     {
         var profile = await FindOwnedAsync(chatId, id, ct);
-        if (profile is null) return ProfileNotFound;
+        if (profile is null) return Errors.ProfileNotFound;
 
         change(profile);
         await db.SaveChangesAsync(ct);
@@ -208,9 +206,7 @@ public sealed class ProfileService(AppDb db)
         p.RemoteOnly = draft.RemoteOnly;
     }
 
-    private static Error KeywordError() =>
-        Error.Validation($"The keyword must be 1-{SourceCatalog.MaxKeywordLength} characters.");
+    private static Error KeywordError() => Errors.KeywordInvalid(SourceCatalog.MaxKeywordLength);
 
-    private static Error NameError() =>
-        Error.Validation($"The name must be 1-{ProfileRules.MaxNameLength} characters.");
+    private static Error NameError() => Errors.NameInvalid(ProfileRules.MaxNameLength);
 }

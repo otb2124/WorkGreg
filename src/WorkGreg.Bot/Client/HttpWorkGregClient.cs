@@ -20,7 +20,7 @@ public sealed class CoreApiException(HttpStatusCode status, string message) : Ex
 
 /// <summary>
 /// <see cref="IWorkGregClient"/> over the core's REST API. Typed HttpClient: base URL, X-Api-Key and the retry policy are
-/// set where it is registered (AddWorkGregHttpClient). A 400/404/409 with an <c>{ kind, message }</c> body is the core's
+/// set where it is registered (AddWorkGregHttpClient). A 400/404/409/423 with an <c>{ kind, code, message, args }</c> body is the core's
 /// <see cref="Error"/>; every other failure throws <see cref="CoreApiException"/> or the HttpClient's own exception,
 /// which the bot's dispatcher logs.
 /// </summary>
@@ -135,7 +135,7 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
         // An empty id would make the URL a different route; say what is wrong instead.
         var provider = providerId?.Trim();
         if (string.IsNullOrEmpty(provider))
-            return Task.FromResult<Result<SourceChangeDto, Error>>(Error.Validation("Name a source."));
+            return Task.FromResult<Result<SourceChangeDto, Error>>(Errors.SourceNameRequired);
 
         return SendAsync<SourceChangeDto>(method,
             $"{Chat(chatId)}/profiles/{profileId}/sources/by-provider/{Uri.EscapeDataString(provider)}{suffix}", null, ct);
@@ -165,16 +165,21 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
         throw Failure(response.StatusCode);
     }
 
-    /// <summary>The core's { kind, message } body. Null for anything else, e.g. a 404 from a wrong URL or a framework 400.</summary>
+    /// <summary>
+    /// The core's <c>{ kind, code, message, args }</c> body. Null for anything else, e.g. a 404 from a wrong URL or a
+    /// framework 400. A body from an older core that has no <c>code</c> still becomes an <see cref="Error"/>, with
+    /// <see cref="ErrorCodes.Unknown"/>, so the bot can show its message.
+    /// </summary>
     private static async Task<Error?> TryReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
     {
-        if (response.StatusCode is not (HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.Conflict))
-            return null;
+        if (!ErrorHttp.IsErrorStatus((int)response.StatusCode)) return null;
 
         try
         {
             var error = await response.Content.ReadFromJsonAsync<Error>(Json, ct);
-            return error is { Message: not null } ? error : null;
+            if (error is not { Message: not null }) return null;
+
+            return string.IsNullOrEmpty(error.Code) ? error with { Code = ErrorCodes.Unknown } : error;
         }
         catch (JsonException) { return null; }
         catch (NotSupportedException) { return null; }   // the body is not JSON
@@ -193,3 +198,4 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
             ? result.Value
             : throw new CoreApiException(HttpStatusCode.BadRequest, $"The core refused the request: {result.Error.Message}");
 }
+

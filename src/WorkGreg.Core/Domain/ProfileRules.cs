@@ -17,11 +17,25 @@ public static class ProfileRules
     public static string NameFromKeyword(string keyword) =>
         keyword.Length <= MaxNameLength ? keyword : keyword[..MaxNameLength];
 
+    /// <summary>
+    /// The form a provider id is stored and compared in: trimmed, lower case. A catalog id is already lower case
+    /// (<see cref="CatalogValidator"/> enforces it), so a known provider resolves to its catalog id; an id that is not in
+    /// the catalog any more (a removed provider on an old row) is just trimmed and lower-cased.
+    /// Use this on anything typed by a user before comparing it with <see cref="Source.Provider"/>.
+    /// </summary>
+    public static string NormalizeProviderId(string? raw)
+    {
+        var id = (raw ?? "").Trim();
+        return (SourceCatalog.Find(id)?.Id ?? id).ToLowerInvariant();
+    }
+
     public static Source NewSource(SearchProfile profile, SourceProvider provider) => new()
     {
         SearchProfileId = profile.Id,
         Type = provider.Type,
-        Provider = provider.Id,
+
+        // Lower case at write time, so the column can be compared with a plain "=" everywhere.
+        Provider = provider.Id.ToLowerInvariant(),
         Url = provider.BuildUrl(profile.Keyword),
         Name = provider.Name
     };
@@ -39,4 +53,3 @@ public static class ProfileRules
         }
     }
 }
-

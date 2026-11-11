@@ -1,4 +1,4 @@
-﻿using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 
@@ -43,11 +43,10 @@ internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
     public static PromptTarget NewProfile() => new(PromptKind.NewProfile, 0);
 
     /// <summary>Filter prompts can be cleared with the 🗑 button.</summary>
-    public bool IsFilter => Kind is PromptKind.Include or PromptKind.Exclude or PromptKind.Companies
-                                or PromptKind.Locations or PromptKind.MinSalary;
+    public bool IsFilter => Menu.PromptSpecs.Of(Kind).Clearable;
 
     /// <summary>The answer is a comma list (lines are joined with ", ").</summary>
-    public bool IsList => Kind is PromptKind.Include or PromptKind.Exclude or PromptKind.Companies or PromptKind.Locations;
+    public bool IsList => Menu.PromptSpecs.Of(Kind).IsList;
 
     /// <summary>"newp" or "kw:3".</summary>
     public string Encode() => Kind == PromptKind.NewProfile ? CodeOf[Kind] : $"{CodeOf[Kind]}:{ProfileId}";
