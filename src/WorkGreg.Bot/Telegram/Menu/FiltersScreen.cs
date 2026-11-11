@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using WorkGreg.Client;
+using WorkGreg.Contracts;
 using static WorkGreg.Telegram.MenuKit;
 using static WorkGreg.Telegram.Replies;
 
@@ -16,8 +17,14 @@ internal sealed class FiltersScreen(IWorkGregClient client, ProfilesScreen profi
     public async Task<Screen> RenderAsync(long chatId, int profileId, string? notice, CancellationToken ct)
     {
         var p = await client.TryLoadAsync(chatId, profileId, ct);
-        if (p is null) return await profilesScreen.RenderAsync(chatId, Warn(NoSuchProfile), ct);
+        return p is null
+            ? await profilesScreen.RenderAsync(chatId, Warn(NoSuchProfile), ct)
+            : Render(p, notice);
+    }
 
+    /// <summary>Draws a profile that is already loaded (for example the answer of a change), without asking the core again.</summary>
+    public Screen Render(ProfileDto p, string? notice)
+    {
         string Show(IReadOnlyList<string> l, string empty) => l.Count > 0 ? Html(Short(ListText(l))) : $"<i>{empty}</i>";
 
         var sb = new StringBuilder();
@@ -40,7 +47,7 @@ internal sealed class FiltersScreen(IWorkGregClient client, ProfilesScreen profi
             Row(Btn("🏢 Companies", CallbackData.Ask(PromptKind.Companies, p.Id)),
                 Btn("📍 Locations", CallbackData.Ask(PromptKind.Locations, p.Id))),
             Row(Btn("💰 Min salary", CallbackData.Ask(PromptKind.MinSalary, p.Id)),
-                Btn(p.RemoteOnly ? "🏠 Remote: ON ✅" : "🏠 Remote: OFF", CallbackData.ToggleRemote(p.Id))),
+                Btn(p.RemoteOnly ? "🏠 Remote: ON ✅" : "🏠 Remote: OFF", CallbackData.ToggleRemote(p.Id, !p.RemoteOnly))),
             Row(Btn("⬅ Back", CallbackData.Profile(p.Id))));
 
         return new Screen(sb.ToString(), kb);

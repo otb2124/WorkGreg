@@ -1,11 +1,12 @@
-﻿using Microsoft.Extensions.Options;
-using WorkGreg.Client;
-using WorkGreg.Services;
-using WorkGreg.Telegram.Menu;
-using global::Telegram.Bot;
+﻿using global::Telegram.Bot;
 using global::Telegram.Bot.Exceptions;
 using global::Telegram.Bot.Polling;
 using global::Telegram.Bot.Types;
+using Microsoft.Extensions.Options;
+using System.Diagnostics;
+using WorkGreg.Client;
+using WorkGreg.Services;
+using WorkGreg.Telegram.Menu;
 
 namespace WorkGreg.Telegram;
 
@@ -31,8 +32,6 @@ internal sealed class UpdateDispatcher(
 
     public async Task HandleUpdateAsync(ITelegramBotClient client, Update update, CancellationToken ct)
     {
-        // Every log line written while this update is handled (here, in commands, in screens) carries both ids.
-        // Needs "Logging:Console:IncludeScopes": true to show up in the console output.
         var chatId = update.Message?.Chat.Id ?? update.CallbackQuery?.Message?.Chat.Id;
         using var scope = log.BeginScope(new Dictionary<string, object?>
         {
@@ -40,6 +39,7 @@ internal sealed class UpdateDispatcher(
             ["UpdateId"] = update.Id
         });
 
+        var started = Stopwatch.GetTimestamp();
         try
         {
             if (update.CallbackQuery is { } cq)
@@ -47,12 +47,17 @@ internal sealed class UpdateDispatcher(
             else if (update.Message is { Text: not null } message)
                 await HandleMessageAsync(message, ct);
         }
-        // Only a real shutdown is allowed to escape. A Telegram/HTTP timeout is also a cancellation
-        // exception, and it must not be rethrown into the receiver loop.
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             var reply = FailureReply(ex, $"Update {update.Id}");
             await TryNotifyAsync(update, reply, ct);
+        }
+        finally
+        {
+            // Per-tap latency, including the Telegram calls. The button's action code ("pen", "home") is the label,
+            // so ids never split the groups and no user text is logged.
+            var kind = update.CallbackQuery?.Data?.Split(':')[0] ?? (update.Message is not null ? "message" : "other");
+            log.LogInformation("Update handled in {ElapsedMs:0} ms ({Kind})", Stopwatch.GetElapsedTime(started).TotalMilliseconds, kind);
         }
     }
 

@@ -101,3 +101,7 @@ public sealed record JobCountDto(int Count);
 /// PATCH /settings. Change one thing per request: Paused, or Delivery (with DigestHourUtc, which Digest needs).
 /// </summary>
 public sealed record PatchSettingsRequest(bool? Paused, DeliveryMode? Delivery, int? DigestHourUtc);
+
+
+/// <summary>GET /api/{chatId}/overview: what the main menu needs, in one call instead of two.</summary>
+public sealed record OverviewDto(SettingsDto Settings, IReadOnlyList<ProfileDto> Profiles);

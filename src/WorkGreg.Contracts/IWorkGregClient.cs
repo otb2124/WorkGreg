@@ -63,7 +63,7 @@ public interface IWorkGregClient
     Task<Result<SourceChangeDto, Error>> ToggleSourceAsync(long chatId, int profileId, string providerId, CancellationToken ct);
 
     // ---- user settings
-
+    Task<OverviewDto> GetOverviewAsync(long chatId, CancellationToken ct);
     Task<SettingsDto> GetSettingsAsync(long chatId, CancellationToken ct);
     Task<Result<SettingsDto, Error>> SetPausedAsync(long chatId, bool paused, CancellationToken ct);
     Task<Result<SettingsDto, Error>> SetDeliveryAsync(long chatId, DeliveryMode mode, int? digestHourUtc, CancellationToken ct);

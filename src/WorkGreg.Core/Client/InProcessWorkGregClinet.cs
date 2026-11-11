@@ -83,7 +83,13 @@ public sealed class InProcessWorkGregClient(
         (await sources.ToggleAsync(chatId, profileId, providerId, ct)).Map(c => c.ToDto());
 
     // ---- user settings
-
+    public async Task<OverviewDto> GetOverviewAsync(long chatId, CancellationToken ct)
+    {
+        // One scoped DbContext cannot run two queries at once, so these are awaited one after the other.
+        var user = await GetSettingsAsync(chatId, ct);
+        var all = await ListProfilesAsync(chatId, ct);
+        return new OverviewDto(user, all);
+    }
     public async Task<SettingsDto> GetSettingsAsync(long chatId, CancellationToken ct) =>
         (await settings.GetAsync(chatId, ct)).ToDto();
 

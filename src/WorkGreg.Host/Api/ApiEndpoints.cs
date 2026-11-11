@@ -51,6 +51,8 @@ public static class ApiEndpoints
         user.MapPost("/check", StartCheck);
         user.MapGet("/check", GetCheck);
         user.MapPost("/check/stop", StopCheck);
+
+        user.MapGet("/overview", GetOverview);
     }
 
     // ---- Catalog
@@ -74,7 +76,9 @@ public static class ApiEndpoints
     }
 
     // ---- Settings (user level)
-
+    /// <summary>Settings and profiles together, so a client that shows both (the bot's main menu) makes one request.</summary>
+    private static async Task<IResult> GetOverview(long chatId, IWorkGregClient client, CancellationToken ct) =>
+        Results.Ok(await client.GetOverviewAsync(chatId, ct));
     private static async Task<IResult> GetSettings(long chatId, SettingsService settings, CancellationToken ct) =>
         Results.Ok((await settings.GetAsync(chatId, ct)).ToDto());
 

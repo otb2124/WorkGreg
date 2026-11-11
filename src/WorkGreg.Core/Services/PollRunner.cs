@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 using WorkGreg.Data;
 using WorkGreg.Domain;
 using WorkGreg.Fetching;
@@ -79,6 +80,7 @@ public sealed class PollRunner(
     public async Task<PollResult> RunAsync(long? ownerChatId, CancellationToken ct)
     {
         using var lease = await coordinator.AcquireAsync(ownerChatId, ct);
+        var started = Stopwatch.GetTimestamp();
 
         var tallies = new Dictionary<long, OwnerTally>();
         try
@@ -97,8 +99,8 @@ public sealed class PollRunner(
 
             var sent = tallies.Values.Sum(t => t.Sent);
             log.LogInformation(
-                "Poll finished: {Fetched}/{Sources} sources checked, {Sent} vacancies sent (limit {Max} per user), {Skipped} owner(s) skipped",
-                fetched, queue.Count, sent, cycle.Max, cycle.Unavailable.Count);
+                "Poll finished in {ElapsedMs:0} ms: {Fetched}/{Sources} sources checked, {Sent} vacancies sent (limit {Max} per user), {Skipped} owner(s) skipped",
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds, fetched, queue.Count, sent, cycle.Max, cycle.Unavailable.Count);
             return new PollResult(sent, false);
         }
         catch (OperationCanceledException) when (lease.StopRequested && !ct.IsCancellationRequested)

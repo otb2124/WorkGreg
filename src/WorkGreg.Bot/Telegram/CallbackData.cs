@@ -81,7 +81,9 @@ internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
 ///
 ///   home | help | pls | dlv | dlvd | dlvi | chk | stop | rst | rstok | np
 ///   pause:0|1
-///   p:&lt;id&gt; | pf:&lt;id&gt; | pen:&lt;id&gt; | prem:&lt;id&gt; | pdel:&lt;id&gt; | pdelok:&lt;id&gt;
+///   pen:&lt;id&gt;:0|1 | prem:&lt;id&gt;:0|1          the value to set (enabled / remote only), so a tap is idempotent
+///   pen:&lt;id&gt; | prem:&lt;id&gt;                   old buttons without a value: still accepted, they flip the current value
+///   p:&lt;id&gt; | pf:&lt;id&gt; | prem... | prem... | pdel:&lt;id&gt; | pdelok:&lt;id&gt;
 ///   ps:&lt;id&gt;[:&lt;region&gt;]
 ///   pst:&lt;id&gt;:&lt;provider&gt;[:&lt;region&gt;]
 ///   ask:&lt;prompt&gt; | clr:&lt;prompt&gt;          prompt = newp | kw|nm|inc|exc|com|loc|sal:&lt;id&gt;
@@ -98,6 +100,12 @@ internal sealed record CallbackData(CallbackAction Action)
     public PromptTarget? Prompt { get; init; }
     public int Hour { get; init; }
     public bool Flag { get; init; }
+
+    /// <summary>
+    /// For <see cref="CallbackAction.ToggleEnabled"/> and <see cref="CallbackAction.ToggleRemote"/>: the value the button
+    /// sets. Null only for a button that was sent before values were added; its handler flips the current value instead.
+    /// </summary>
+    public bool? Desired { get; init; }
 
     /// <summary>For <see cref="CallbackAction.Cancel"/>: the screen to go back to.</summary>
     public CallbackData? Back { get; init; }
@@ -122,8 +130,15 @@ internal sealed record CallbackData(CallbackAction Action)
     public static CallbackData Sources(int id, string? region = null) => new(CallbackAction.Sources) { ProfileId = id, Region = region };
     public static CallbackData ToggleSource(int id, string provider, string? region = null) =>
         new(CallbackAction.ToggleSource) { ProfileId = id, Provider = provider, Region = region };
-    public static CallbackData ToggleEnabled(int id) => new(CallbackAction.ToggleEnabled) { ProfileId = id };
-    public static CallbackData ToggleRemote(int id) => new(CallbackAction.ToggleRemote) { ProfileId = id };
+
+    /// <summary>The button says what the profile's enabled state should become, not "flip it".</summary>
+    public static CallbackData ToggleEnabled(int id, bool enable) =>
+        new(CallbackAction.ToggleEnabled) { ProfileId = id, Desired = enable };
+
+    /// <summary>The button says what the remote-only filter should become, not "flip it".</summary>
+    public static CallbackData ToggleRemote(int id, bool on) =>
+        new(CallbackAction.ToggleRemote) { ProfileId = id, Desired = on };
+
     public static CallbackData RemoveAsk(int id) => new(CallbackAction.RemoveAsk) { ProfileId = id };
     public static CallbackData RemoveConfirm(int id) => new(CallbackAction.RemoveConfirm) { ProfileId = id };
     public static CallbackData DeliveryHour(int hour) => new(CallbackAction.DeliveryHour) { Hour = hour };
@@ -186,7 +201,10 @@ internal sealed record CallbackData(CallbackAction Action)
         {
             CallbackAction.Pause => $"{code}:{(Flag ? 1 : 0)}",
 
-            CallbackAction.Profile or CallbackAction.Filters or CallbackAction.ToggleEnabled or CallbackAction.ToggleRemote
+            CallbackAction.ToggleEnabled or CallbackAction.ToggleRemote =>
+                Desired is { } want ? $"{code}:{ProfileId}:{(want ? 1 : 0)}" : $"{code}:{ProfileId}",
+
+            CallbackAction.Profile or CallbackAction.Filters
                 or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm => $"{code}:{ProfileId}",
 
             CallbackAction.Sources => Region is null ? $"{code}:{ProfileId}" : $"{code}:{ProfileId}:{Region}",
@@ -238,8 +256,20 @@ internal sealed record CallbackData(CallbackAction Action)
             case CallbackAction.Pause:
                 return arg is "0" or "1" ? Pause(arg == "1") : null;
 
-            case CallbackAction.Profile or CallbackAction.Filters or CallbackAction.ToggleEnabled
-                or CallbackAction.ToggleRemote or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm:
+            case CallbackAction.ToggleEnabled or CallbackAction.ToggleRemote:
+                {
+                    var bits = arg?.Split(':', 2);
+                    if (bits is null || !TryId(bits[0], out var id)) return null;
+
+                    // "pen:3" is a button from before values were added: no Desired, the handler flips the current value.
+                    if (bits.Length == 1) return new CallbackData(action) { ProfileId = id };
+
+                    return bits[1] is "0" or "1"
+                        ? new CallbackData(action) { ProfileId = id, Desired = bits[1] == "1" }
+                        : null;
+                }
+
+            case CallbackAction.Profile or CallbackAction.Filters or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm:
                 {
                     return TryId(arg, out var id) ? new CallbackData(action) { ProfileId = id } : null;
                 }

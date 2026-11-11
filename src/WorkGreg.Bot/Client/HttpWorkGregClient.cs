@@ -93,7 +93,8 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
         SourceCall(HttpMethod.Post, chatId, profileId, providerId, "/toggle", ct);
 
     // ---- user settings
-
+    public async Task<OverviewDto> GetOverviewAsync(long chatId, CancellationToken ct) =>
+        Unwrap(await SendAsync<OverviewDto>(HttpMethod.Get, $"{Chat(chatId)}/overview", null, ct));
     public async Task<SettingsDto> GetSettingsAsync(long chatId, CancellationToken ct) =>
         Unwrap(await SendAsync<SettingsDto>(HttpMethod.Get, $"{Chat(chatId)}/settings", null, ct));
 

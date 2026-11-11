@@ -13,8 +13,9 @@ internal sealed class MainScreen(IWorkGregClient client, PendingInputStore pendi
 
     public async Task<Screen> RenderAsync(long chatId, string? notice, CancellationToken ct)
     {
-        var user = await client.GetSettingsAsync(chatId, ct);
-        var all = await client.ListProfilesAsync(chatId, ct);
+        var overview = await client.GetOverviewAsync(chatId, ct);   // settings + profiles in one request
+        var user = overview.Settings;
+        var all = overview.Profiles;
         var failing = all.Sum(p => p.Sources.Count(s => s.ConsecutiveFailures > 0));
 
         var sb = new StringBuilder();

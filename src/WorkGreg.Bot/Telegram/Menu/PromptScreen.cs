@@ -47,7 +47,10 @@ internal sealed class PromptScreen(IWorkGregClient client)
         if (p is null)
             return new("Profile not found", null, "That profile doesn't exist (anymore).", CallbackData.Profiles);
 
-        var meta = await client.GetMetaAsync(ct);
+        // Only the rename prompt needs the core's limits; the others never ask for them.
+        var maxNameLength = target.Kind == PromptKind.Rename
+            ? (await client.GetMetaAsync(ct)).MaxNameLength
+            : 0;
 
         var filtersBack = CallbackData.Filters(p.Id);
         var profileBack = CallbackData.Profile(p.Id);
@@ -60,7 +63,7 @@ internal sealed class PromptScreen(IWorkGregClient client)
                 profileBack),
 
             PromptKind.Rename => new("🏷 Rename profile", p.Name,
-                $"Send a new name (up to {meta.MaxNameLength} characters).",
+                $"Send a new name (up to {maxNameLength} characters).",
                 profileBack),
 
             PromptKind.Include => new("🔤 Include keywords", ListText(p.Include),

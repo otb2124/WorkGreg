@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using WorkGreg.Client;
+using WorkGreg.Contracts;
 using static WorkGreg.Telegram.MenuKit;
 using static WorkGreg.Telegram.Replies;
 
@@ -16,8 +17,14 @@ internal sealed class ProfileScreen(IWorkGregClient client, ProfilesScreen profi
     public async Task<Screen> RenderAsync(long chatId, int profileId, string? notice, CancellationToken ct)
     {
         var p = await client.TryLoadAsync(chatId, profileId, ct);
-        if (p is null) return await profilesScreen.RenderAsync(chatId, Warn(NoSuchProfile), ct);
+        return p is null
+            ? await profilesScreen.RenderAsync(chatId, Warn(NoSuchProfile), ct)
+            : Render(p, notice);
+    }
 
+    /// <summary>Draws a profile that is already loaded (for example the answer of a change), without asking the core again.</summary>
+    public Screen Render(ProfileDto p, string? notice)
+    {
         var attached = p.Sources;
 
         var sb = new StringBuilder();
@@ -50,7 +57,7 @@ internal sealed class ProfileScreen(IWorkGregClient client, ProfilesScreen profi
             Row(Btn("✏️ Keyword", CallbackData.Ask(PromptKind.Keyword, p.Id)),
                 Btn("🏷 Rename", CallbackData.Ask(PromptKind.Rename, p.Id))),
             Row(Btn("📡 Sources", CallbackData.Sources(p.Id)), Btn("🎯 Filters", CallbackData.Filters(p.Id))),
-            Row(Btn(p.Enabled ? "⏸ Disable" : "▶️ Enable", CallbackData.ToggleEnabled(p.Id))),
+            Row(Btn(p.Enabled ? "⏸ Disable" : "▶️ Enable", CallbackData.ToggleEnabled(p.Id, !p.Enabled))),
             Row(Btn("🗑 Remove profile", CallbackData.RemoveAsk(p.Id)), Btn("⬅ Back", CallbackData.Profiles)));
 
         return new Screen(sb.ToString(), kb);

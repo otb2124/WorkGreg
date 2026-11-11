@@ -6,6 +6,7 @@ using static WorkGreg.Telegram.Replies;
 namespace WorkGreg.Telegram.Menu;
 
 // Buttons that change a profile. Each one: do the change through the client, then show the screen the user was on.
+// The change answers with the whole updated profile, so the screen is drawn from that answer: no read before, none after.
 
 [Handles(CallbackAction.ToggleEnabled)]
 internal sealed class ToggleEnabledHandler(IWorkGregClient client, ProfileScreen profileScreen, ProfilesScreen profilesScreen)
@@ -13,15 +14,29 @@ internal sealed class ToggleEnabledHandler(IWorkGregClient client, ProfileScreen
 {
     public async Task<CallbackResult> HandleAsync(CallbackContext ctx)
     {
-        var p = await client.TryLoadAsync(ctx.ChatId, ctx.Data.ProfileId, ctx.Ct);
-        if (p is null) return CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, Warn(NoSuchProfile), ctx.Ct));
+        var id = ctx.Data.ProfileId;
 
-        var enable = !p.Enabled;
-        var result = await client.SetEnabledAsync(ctx.ChatId, p.Id, enable, ctx.Ct);
+        bool enable;
+        if (ctx.Data.Desired is { } desired)
+        {
+            enable = desired;
+        }
+        else
+        {
+            // A button sent before buttons carried their value. Remove this branch once old menus are out of chats.
+            var current = await client.TryLoadAsync(ctx.ChatId, id, ctx.Ct);
+            if (current is null) return CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, Warn(NoSuchProfile), ctx.Ct));
+            enable = !current.Enabled;
+        }
+
+        var result = await client.SetEnabledAsync(ctx.ChatId, id, enable, ctx.Ct);
         if (result.IsFailure)
-            return CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, Fail(result.Error), ctx.Ct));
+        {
+            var notice = result.Error.Kind == ErrorKind.NotFound ? Warn(NoSuchProfile) : Fail(result.Error);
+            return CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, notice, ctx.Ct));
+        }
 
-        var screen = await profileScreen.RenderAsync(ctx.ChatId, p.Id, null, ctx.Ct);
+        var screen = profileScreen.Render(result.Value, null);
         return CallbackResult.Show(screen with { Toast = enable ? "Profile enabled" : "Profile disabled" });
     }
 }
@@ -32,15 +47,30 @@ internal sealed class ToggleRemoteHandler(IWorkGregClient client, FiltersScreen 
 {
     public async Task<CallbackResult> HandleAsync(CallbackContext ctx)
     {
-        var p = await client.TryLoadAsync(ctx.ChatId, ctx.Data.ProfileId, ctx.Ct);
-        if (p is null) return CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, Warn(NoSuchProfile), ctx.Ct));
+        var id = ctx.Data.ProfileId;
 
-        var on = !p.RemoteOnly;
-        var result = await client.SetRemoteOnlyAsync(ctx.ChatId, p.Id, on, ctx.Ct);
+        bool on;
+        if (ctx.Data.Desired is { } desired)
+        {
+            on = desired;
+        }
+        else
+        {
+            // A button sent before buttons carried their value. Remove this branch once old menus are out of chats.
+            var current = await client.TryLoadAsync(ctx.ChatId, id, ctx.Ct);
+            if (current is null) return CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, Warn(NoSuchProfile), ctx.Ct));
+            on = !current.RemoteOnly;
+        }
+
+        var result = await client.SetRemoteOnlyAsync(ctx.ChatId, id, on, ctx.Ct);
         if (result.IsFailure)
-            return CallbackResult.Show(await filtersScreen.RenderAsync(ctx.ChatId, p.Id, Fail(result.Error), ctx.Ct));
+        {
+            return result.Error.Kind == ErrorKind.NotFound
+                ? CallbackResult.Show(await profilesScreen.RenderAsync(ctx.ChatId, Warn(NoSuchProfile), ctx.Ct))
+                : CallbackResult.Show(await filtersScreen.RenderAsync(ctx.ChatId, id, Fail(result.Error), ctx.Ct));
+        }
 
-        var screen = await filtersScreen.RenderAsync(ctx.ChatId, p.Id, null, ctx.Ct);
+        var screen = filtersScreen.Render(result.Value, null);
         return CallbackResult.Show(screen with { Toast = $"Remote only: {(on ? "on" : "off")}" });
     }
 }
