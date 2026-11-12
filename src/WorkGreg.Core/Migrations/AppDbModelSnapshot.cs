@@ -15,7 +15,155 @@ namespace WorkGreg.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "8.0.33");
+            modelBuilder.HasAnnotation("ProductVersion", "8.0.34");
+
+            modelBuilder.Entity("WorkGreg.Domain.Application", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Ats")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Company")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("JobHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("JobId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("OwnerChatId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ReportJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("Screenshot")
+                        .HasColumnType("BLOB");
+
+                    b.Property<int?>("SearchProfileId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("SubmittedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("JobId");
+
+                    b.HasIndex("SearchProfileId");
+
+                    b.HasIndex("OwnerChatId", "JobId")
+                        .IsUnique();
+
+                    b.HasIndex("OwnerChatId", "Status");
+
+                    b.ToTable("Applications");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.AutofillDocument", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<byte[]>("Content")
+                        .IsRequired()
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("SearchProfileId")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SearchProfileId", "Kind")
+                        .IsUnique();
+
+                    b.ToTable("AutofillDocuments");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.AutofillField", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsRegex")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Key")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MatchBy")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Pattern")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("SearchProfileId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SearchProfileId", "Key")
+                        .IsUnique()
+                        .HasFilter("\"Key\" IS NOT NULL");
+
+                    b.ToTable("AutofillFields");
+                });
 
             modelBuilder.Entity("WorkGreg.Domain.Job", b =>
                 {
@@ -227,6 +375,45 @@ namespace WorkGreg.Migrations
                     b.HasKey("ChatId");
 
                     b.ToTable("UserSettings");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.Application", b =>
+                {
+                    b.HasOne("WorkGreg.Domain.Job", "Job")
+                        .WithMany()
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("WorkGreg.Domain.SearchProfile", "SearchProfile")
+                        .WithMany()
+                        .HasForeignKey("SearchProfileId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Job");
+
+                    b.Navigation("SearchProfile");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.AutofillDocument", b =>
+                {
+                    b.HasOne("WorkGreg.Domain.SearchProfile", "SearchProfile")
+                        .WithMany()
+                        .HasForeignKey("SearchProfileId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SearchProfile");
+                });
+
+            modelBuilder.Entity("WorkGreg.Domain.AutofillField", b =>
+                {
+                    b.HasOne("WorkGreg.Domain.SearchProfile", "SearchProfile")
+                        .WithMany()
+                        .HasForeignKey("SearchProfileId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SearchProfile");
                 });
 
             modelBuilder.Entity("WorkGreg.Domain.JobDelivery", b =>

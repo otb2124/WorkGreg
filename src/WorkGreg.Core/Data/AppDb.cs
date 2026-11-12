@@ -22,6 +22,15 @@ public class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
     /// <summary>Job hunts: keyword + filters + sources.</summary>
     public DbSet<SearchProfile> SearchProfiles => Set<SearchProfile>();
 
+    /// <summary>What is entered into application forms for a profile: standard values and custom "question -> answer" rules.</summary>
+    public DbSet<AutofillField> AutofillFields => Set<AutofillField>();
+
+    /// <summary>Files (CV, cover-letter file) attached to application forms, one per profile and kind.</summary>
+    public DbSet<AutofillDocument> AutofillDocuments => Set<AutofillDocument>();
+
+    /// <summary>Application attempts and the applied/skipped tracker. History: survives job purges and profile deletion.</summary>
+    public DbSet<Application> Applications => Set<Application>();
+
     // List<string> <-> "a, b, c" in a TEXT column: the same format the columns already hold, so no data migration.
     private static readonly ValueConverter<List<string>, string> ListConverter = new(
         list => FilterList.Join(list),
@@ -70,5 +79,34 @@ public class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
         b.Entity<UserSettings>().HasKey(p => p.ChatId);
         b.Entity<UserSettings>().Property(p => p.ChatId).ValueGeneratedNever();
         b.Entity<UserSettings>().Property(p => p.Delivery).HasConversion<string>();
+
+        // Autofill: SearchProfile -> AutofillField / AutofillDocument, cascade delete (the user's settings go with the profile).
+        b.Entity<AutofillField>().HasOne(f => f.SearchProfile).WithMany()
+            .HasForeignKey(f => f.SearchProfileId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<AutofillField>().Property(f => f.Kind).HasConversion<string>();
+        b.Entity<AutofillField>().Property(f => f.Key).HasConversion<string>();
+        b.Entity<AutofillField>().Property(f => f.MatchBy).HasConversion<string>();
+        b.Entity<AutofillField>().Property(f => f.Pattern).HasMaxLength(AutofillLimits.PatternMaxLength);
+        b.Entity<AutofillField>().Property(f => f.Value).HasMaxLength(AutofillLimits.CoverLetterMaxLength);
+        // One standard row per profile and key. Custom rows have Key = NULL and are not constrained (hence the filter).
+        b.Entity<AutofillField>().HasIndex(f => new { f.SearchProfileId, f.Key })
+            .IsUnique().HasFilter("\"Key\" IS NOT NULL");
+
+        b.Entity<AutofillDocument>().HasOne(d => d.SearchProfile).WithMany()
+            .HasForeignKey(d => d.SearchProfileId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<AutofillDocument>().Property(d => d.Kind).HasConversion<string>();
+        // Uploading a CV replaces the previous one.
+        b.Entity<AutofillDocument>().HasIndex(d => new { d.SearchProfileId, d.Kind }).IsUnique();
+
+        // Applications are history: deleting a job (retention) or a profile must NOT delete them, only detach them.
+        b.Entity<Application>().HasOne(a => a.SearchProfile).WithMany()
+            .HasForeignKey(a => a.SearchProfileId).OnDelete(DeleteBehavior.SetNull);
+        b.Entity<Application>().HasOne(a => a.Job).WithMany()
+            .HasForeignKey(a => a.JobId).OnDelete(DeleteBehavior.SetNull);
+        b.Entity<Application>().Property(a => a.Ats).HasConversion<string>();
+        b.Entity<Application>().Property(a => a.Status).HasConversion<string>();
+        // One application per user and vacancy. SQLite treats NULLs as distinct, so rows whose job was purged do not collide.
+        b.Entity<Application>().HasIndex(a => new { a.OwnerChatId, a.JobId }).IsUnique();
+        b.Entity<Application>().HasIndex(a => new { a.OwnerChatId, a.Status });
     }
 }
