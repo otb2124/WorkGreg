@@ -47,6 +47,12 @@ public static class ApiEndpoints
         user.MapDelete("/profiles/{id:int}/autofill/documents/{kind}", DeleteAutofillDocument);
         user.MapPost("/profiles/{id:int}/autofill/copy", CopyAutofill);
 
+        // The buttons under a delivered vacancy. The vacancy is addressed by its delivery id; the service checks it is this chat's.
+        user.MapPost("/deliveries/{deliveryId:int}/autofill", StartAutofill);
+        user.MapPost("/deliveries/{deliveryId:int}/applied", MarkApplied);
+        user.MapPost("/deliveries/{deliveryId:int}/skip", SkipVacancy);
+        user.MapGet("/applications/{applicationId:int}", GetApplication);
+
         user.MapPost("/profiles/{id:int}/sources", AddSource);
         user.MapPatch("/profiles/{id:int}/sources/{sourceId:int}", UpdateSource);
         user.MapDelete("/profiles/{id:int}/sources/{sourceId:int}", RemoveSource);
@@ -347,6 +353,22 @@ public static class ApiEndpoints
 
     private static IResult UnknownKey(string key) =>
         Errors.InvalidRequest($"Unknown autofill key '{key}'. Keys: {string.Join(", ", Enum.GetNames<AutofillKey>())}.").ToHttp();
+
+    // ---- Applications (the tracker and the 🤖 AutoFill button under a vacancy)
+
+    /// <summary>Until the browser exists this answers with a preview of what would be filled; nothing is stored.</summary>
+    private static async Task<IResult> StartAutofill(long chatId, int deliveryId, IWorkGregClient client, CancellationToken ct) =>
+        (await client.StartAutofillAsync(chatId, deliveryId, ct)).ToHttp(Results.Ok);
+
+    /// <summary>Idempotent. 409 when the vacancy was skipped (or is in another state) already.</summary>
+    private static async Task<IResult> MarkApplied(long chatId, int deliveryId, IWorkGregClient client, CancellationToken ct) =>
+        (await client.MarkAppliedAsync(chatId, deliveryId, ct)).ToHttp(Results.Ok);
+
+    private static async Task<IResult> SkipVacancy(long chatId, int deliveryId, IWorkGregClient client, CancellationToken ct) =>
+        (await client.SkipAsync(chatId, deliveryId, ct)).ToHttp(Results.Ok);
+
+    private static async Task<IResult> GetApplication(long chatId, int applicationId, IWorkGregClient client, CancellationToken ct) =>
+        (await client.GetApplicationAsync(chatId, applicationId, ct)).ToHttp(Results.Ok);
 
     // ---- Sources of a profile
 

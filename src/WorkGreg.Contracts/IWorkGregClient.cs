@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using WorkGreg.Contracts;
 using WorkGreg.Domain;
 using WorkGreg.Services;
@@ -73,6 +73,20 @@ public interface IWorkGregClient
 
     /// <summary>Replaces the target profile's autofill settings with a copy of the source profile's. Answers with the target's settings.</summary>
     Task<Result<AutofillSettingsDto, Error>> CopyAutofillAsync(long chatId, int fromProfileId, int toProfileId, CancellationToken ct);
+
+    // ---- applications: the 🤖 AutoFill button and the applied / skipped tracker under a delivered vacancy.
+    // The vacancy is addressed by its delivery id (the one in the button); the core checks it belongs to the chat.
+
+    /// <summary>Tapping 🤖 AutoFill. Until the browser exists (Applier) it answers with a preview of what would be filled; nothing is stored.</summary>
+    Task<Result<AutofillPreviewDto, Error>> StartAutofillAsync(long chatId, int deliveryId, CancellationToken ct);
+
+    /// <summary>✅ Applied. Idempotent: marking an already applied vacancy again succeeds. Conflict when it was skipped (or is in another state).</summary>
+    Task<Result<ApplicationDto, Error>> MarkAppliedAsync(long chatId, int deliveryId, CancellationToken ct);
+
+    /// <summary>⏭ Skip. Idempotent like <see cref="MarkAppliedAsync"/>.</summary>
+    Task<Result<ApplicationDto, Error>> SkipAsync(long chatId, int deliveryId, CancellationToken ct);
+
+    Task<Result<ApplicationDto, Error>> GetApplicationAsync(long chatId, int applicationId, CancellationToken ct);
 
     // ---- sources of a profile (addressed by provider id)
 

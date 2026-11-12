@@ -1,5 +1,6 @@
-﻿using System.Text;
+using System.Text;
 using WorkGreg.Client;
+using WorkGreg.Domain;
 using global::Telegram.Bot.Types.ReplyMarkups;
 using static WorkGreg.Telegram.MenuKit;
 using static WorkGreg.Telegram.Replies;
@@ -42,6 +43,8 @@ internal sealed class PromptScreen(IWorkGregClient client)
                 "Send the keyword to search for, e.g. <code>full stack dev</code> or <code>it support</code>.\n" +
                 "It also becomes the profile's name (you can rename it later). Afterwards you pick its sources and filters.",
                 CallbackData.Profiles);
+
+        if (target.IsAutofill) return await DescribeAutofillAsync(chatId, target, ct);
 
         var p = await client.TryLoadAsync(chatId, target.ProfileId, ct);
         if (p is null)
@@ -94,4 +97,66 @@ internal sealed class PromptScreen(IWorkGregClient client)
             _ => throw new ArgumentOutOfRangeException(nameof(target), target.Kind, "Unknown prompt kind.")
         };
     }
+
+    /// <summary>The autofill prompts: a standard value, a new or edited custom answer, the CV. They read the autofill settings, not the profile.</summary>
+    private async Task<Field> DescribeAutofillAsync(long chatId, PromptTarget target, CancellationToken ct)
+    {
+        var loaded = await client.GetAutofillAsync(chatId, target.ProfileId, ct);
+        if (loaded.IsFailure)
+            return new("Profile not found", null, "That profile doesn't exist (anymore).", CallbackData.Profiles);
+
+        var settings = loaded.Value;
+        var back = CallbackData.Autofill(target.ProfileId);
+
+        switch (target.Kind)
+        {
+            case PromptKind.AutofillValue:
+                {
+                    var key = target.Key!.Value;
+                    var current = settings.Values.FirstOrDefault(v => v.Key == key)?.Value ?? "";
+                    return new($"✏️ {AutofillLabels.Of(key)}", current, ValueHelp(key), back);
+                }
+
+            case PromptKind.AutofillAddRule:
+                return new("➕ Custom answer", null, AutofillRuleText.Help, back);
+
+            case PromptKind.AutofillEditRule:
+                {
+                    var rule = settings.Rules.FirstOrDefault(r => r.Id == target.ItemId);
+                    return rule is null
+                        ? new("Answer not found", null, "That custom answer doesn't exist (anymore).", back)
+                        : new("✏️ Custom answer", AutofillRuleText.Format(rule),
+                            "Send the new line.\n" + AutofillRuleText.Help, CallbackData.AutofillRule(target.ProfileId, rule.Id));
+                }
+
+            case PromptKind.AutofillCv:
+                {
+                    var cv = settings.Documents.FirstOrDefault(d => d.Kind == AutofillDocumentKind.Cv);
+                    return new("📎 CV", cv?.FileName ?? "",
+                        "Send your CV as a <b>file</b> (PDF or DOCX, up to 5 MB), not as a photo. It replaces the current one.", back);
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(target), target.Kind, "Not an autofill prompt.");
+        }
+    }
+
+    private static string ValueHelp(AutofillKey key) => key switch
+    {
+        AutofillKey.FirstName => "Send your first name.",
+        AutofillKey.LastName => "Send your last name.",
+        AutofillKey.Email => "Send the email address to put on applications.",
+        AutofillKey.Phone => "Send your phone number the way a form should get it, e.g. <code>+385 91 234 5678</code>.",
+        AutofillKey.City => "Send the city you live in.",
+        AutofillKey.Country => "Send your country.",
+        AutofillKey.LinkedIn => "Send the link to your LinkedIn profile.",
+        AutofillKey.GitHub => "Send the link to your GitHub profile.",
+        AutofillKey.Website => "Send the link to your website or portfolio.",
+        AutofillKey.Salary => "Send the expected salary exactly as it should be typed, e.g. <code>2500</code> or <code>2500 EUR net</code>.",
+        AutofillKey.NoticePeriod => "Send your notice period, e.g. <code>30 days</code>.",
+        AutofillKey.CoverLetter =>
+            "Send your cover letter as a template. Line breaks are kept. These words are replaced for each vacancy: " +
+            "<code>{{Company}}</code>, <code>{{Title}}</code>, <code>{{FirstName}}</code>, <code>{{LastName}}</code>.",
+        _ => "Send the value."
+    };
 }

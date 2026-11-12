@@ -1,8 +1,10 @@
-﻿namespace WorkGreg.Telegram;
+namespace WorkGreg.Telegram;
 
 /// <summary>A slash command split into its name and the rest of the text.</summary>
 internal readonly record struct CommandLine(string Name, string Args)
 {
+    private const string DigestAutofillPrefix = "af_";
+
     /// <summary>
     /// "/Include@MyBot 2 a, b" gives Name "include" and Args "2 a, b". False when the text is not a slash command.
     /// </summary>
@@ -16,7 +18,19 @@ internal readonly record struct CommandLine(string Name, string Args)
         var at = name.IndexOf('@');
         if (at > 0) name = name[..at];
 
-        line = new CommandLine(name.TrimStart('/'), parts.Length > 1 ? parts[1] : "");
+        name = name.TrimStart('/');
+
+        // "/af_123" is the form a digest line carries, because Telegram only makes a command with no space in it tappable.
+        // It means the same as "/af 123".
+        if (name.StartsWith(DigestAutofillPrefix, StringComparison.Ordinal)
+            && name.Length > DigestAutofillPrefix.Length
+            && name[DigestAutofillPrefix.Length..].All(char.IsAsciiDigit))
+        {
+            line = new CommandLine("af", name[DigestAutofillPrefix.Length..]);
+            return true;
+        }
+
+        line = new CommandLine(name, parts.Length > 1 ? parts[1] : "");
         return true;
     }
 }

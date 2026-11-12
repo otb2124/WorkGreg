@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Text;
 using WorkGreg.Domain;
 using WorkGreg.Fetching;
@@ -6,8 +6,12 @@ using WorkGreg.Filtering;
 
 namespace WorkGreg.Services;
 
-/// <summary>One vacancy going into a digest, with the labels the digest groups it under.</summary>
-public readonly record struct DigestItem(Job Job, string SourceName, string ProfileName);
+/// <summary>
+/// One vacancy going into a digest, with the labels the digest groups it under. <paramref name="AutofillDeliveryId"/> is set
+/// when the vacancy's profile is ready for AutoFill: its line then ends with the tappable <c>/af_&lt;id&gt;</c> command
+/// (a digest is one message, so it cannot carry a button per vacancy).
+/// </summary>
+public readonly record struct DigestItem(Job Job, string SourceName, string ProfileName, int? AutofillDeliveryId = null);
 
 /// <summary>A ready digest message and how many of the offered vacancies fit into it (the first <see cref="Included"/>).</summary>
 public readonly record struct DigestPage(string Html, int Included);
@@ -87,7 +91,7 @@ public static class MessageFormatter
 
         foreach (var item in items)
         {
-            var line = DigestLine(item.Job);
+            var line = DigestLine(item);
             var cost = line.Length + 1 +
                        (profilesSeen.Contains(item.ProfileName) ? 0 : DigestProfileHeader(item.ProfileName, 99).Length + 2);
 
@@ -122,8 +126,9 @@ public static class MessageFormatter
     private static string DigestProfileHeader(string profileName, int count) =>
         $"🔎 <b>{Html(Truncate(profileName, 60))}</b> ({count})";
 
-    private static string DigestLine(Job job)
+    private static string DigestLine(DigestItem item)
     {
+        var job = item.Job;
         var sb = new StringBuilder();
         sb.Append($"• <a href=\"{WebUtility.HtmlEncode(job.Url)}\">{Html(Truncate(job.Title, 120))}</a>");
 
@@ -133,6 +138,9 @@ public static class MessageFormatter
         if (RemoteCriterion.LooksRemote(job)) details.Add("🌐");
         if (job.Salary is { } salary) details.Add($"💰 {salary:N0}");
         if (details.Count > 0) sb.Append(" — ").Append(string.Join(" · ", details));
+
+        // The line's length is what the digest's size limit counts, so the command is part of the cost of the line.
+        if (item.AutofillDeliveryId is { } deliveryId) sb.Append($" 🤖 /af_{deliveryId}");
 
         return sb.ToString();
     }

@@ -1,4 +1,4 @@
-﻿using WorkGreg.Contracts;
+using WorkGreg.Contracts;
 using WorkGreg.Domain;
 using WorkGreg.Services;
 
@@ -29,6 +29,15 @@ public static class DtoMapping
             s.StandardFields.Where(f => f.Key is not null).Select(f => new AutofillValueDto(f.Key!.Value, f.Value)).ToList(),
             s.CustomRules.Select(r => new AutofillRuleDto(r.Id, r.MatchBy, r.Pattern ?? "", r.IsRegex, r.Value, r.SortOrder)).ToList(),
             s.Documents.Select(d => d.ToDto()).ToList());
+
+    public static ApplicationDto ToDto(this Application a) =>
+        new(a.Id, a.SearchProfileId, a.Title, a.Company, a.Url, a.Ats, a.Status, a.Error,
+            a.CreatedUtc, a.UpdatedUtc, a.SubmittedUtc);
+
+    public static AutofillPreviewDto ToDto(this AutofillPreview p) =>
+        new(p.DeliveryId, p.ProfileId, p.ProfileName, p.Title, p.Company, p.Ready,
+            p.Values.Select(f => new AutofillValueDto(f.Key!.Value, f.Value)).ToList(),
+            p.Missing.ToList(), p.HasCv, p.Existing?.ToDto());
 
     public static SettingsDto ToDto(this UserSettings s) => new(s.Paused, s.Delivery, s.DigestHourUtc);
 

@@ -1,4 +1,4 @@
-﻿using global::Telegram.Bot;
+using global::Telegram.Bot;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http.Resilience;
@@ -89,7 +89,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<SourceService>();
         services.AddScoped<SettingsService>();
         services.AddScoped<JobService>();
-        services.AddScoped<AutofillService>();   // <-- add this
+        services.AddScoped<AutofillService>();
+        services.AddScoped<ApplicationService>();
 
         // The bot's only door into the services above (see IWorkGregClient).
         services.AddScoped<IWorkGregClient, InProcessWorkGregClient>();

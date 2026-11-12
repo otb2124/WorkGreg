@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using WorkGreg.Contracts;
 using WorkGreg.Data;
 using WorkGreg.Domain;
 using WorkGreg.Filtering;
@@ -110,7 +111,10 @@ public sealed class DeliveryService(
             {
                 var text = MessageFormatter.Vacancy(
                     job, source.Name, profile.Name, criteria, time.GetUtcNow().UtcDateTime);
-                await notifier.SendAsync(owner, text, ct);
+
+                // 🤖 AutoFill / ✅ Applied / ⏭ Skip, only for a profile that has what AutoFill needs; the others keep the plain message.
+                var buttons = pending.AutofillReadyProfiles.Contains(profile.Id) ? VacancyButtons(delivery.Id) : null;
+                await notifier.SendAsync(owner, text, ct, buttons);
             }
             catch (MessageRejectedException ex)
             {
@@ -172,7 +176,8 @@ public sealed class DeliveryService(
             if (verdict == Verdict.Filtered) { filteredOut++; continue; }
             if (verdict == Verdict.Duplicate) { duplicates++; continue; }
 
-            candidates.Add((delivery, new DigestItem(delivery.Job, source.Name, profile.Name)));
+            var autofillId = pending.AutofillReadyProfiles.Contains(profile.Id) ? delivery.Id : (int?)null;
+            candidates.Add((delivery, new DigestItem(delivery.Job, source.Name, profile.Name, autofillId)));
         }
 
         if (candidates.Count == 0)
@@ -217,6 +222,10 @@ public sealed class DeliveryService(
 
     // ---- shared
 
+    /// <param name="AutofillReadyProfiles">
+    /// Ids of this owner's profiles that have first name, last name and email stored: their vacancies get the AutoFill button.
+    /// Loaded once per pass (one query for all the owner's profiles), never per vacancy.
+    /// </param>
     /// <param name="DeliveredHashes">
     /// Hashes (company + title, on any board or profile) this owner has already been sent, for the vacancies in
     /// <paramref name="Deliveries"/>. Loaded once per pass; instant mode adds to it as it sends.
@@ -226,7 +235,8 @@ public sealed class DeliveryService(
         IReadOnlyDictionary<int, SearchProfile> Profiles,
         IReadOnlyDictionary<int, ProfileCriteria> Criteria,
         List<JobDelivery> Deliveries,
-        HashSet<string> DeliveredHashes);
+        HashSet<string> DeliveredHashes,
+        IReadOnlySet<int> AutofillReadyProfiles);
 
     /// <summary>
     /// The owner's unprocessed deliveries (of one source, or all) with their vacancies, newest first, for enabled profiles only.
@@ -256,7 +266,12 @@ public sealed class DeliveryService(
 
         var delivered = await LoadDeliveredHashesAsync(db, owner, deliveries.Select(d => d.Job.Hash), ct);
 
-        return new PendingJobs(sources, profiles, criteria, deliveries, delivered);
+        // Nothing to send means nothing to decorate: skip the query.
+        IReadOnlySet<int> autofillReady = deliveries.Count == 0
+            ? new HashSet<int>()
+            : await AutofillService.LoadReadyProfileIdsAsync(db, owner, ct);
+
+        return new PendingJobs(sources, profiles, criteria, deliveries, delivered, autofillReady);
     }
 
     /// <summary>
@@ -281,6 +296,14 @@ public sealed class DeliveryService(
 
         return delivered;
     }
+
+    /// <summary>The buttons under a vacancy message. The bot reads these codes back (see <see cref="DeliveryCallbacks"/>).</summary>
+    private static IReadOnlyList<NotifyButton> VacancyButtons(int deliveryId) =>
+    [
+        new("🤖 AutoFill", DeliveryCallbacks.Autofill(deliveryId)),
+        new("✅ Applied", DeliveryCallbacks.Applied(deliveryId)),
+        new("⏭ Skip", DeliveryCallbacks.Skip(deliveryId), NewRow: false)
+    ];
 
     private enum Verdict { Deliver, Filtered, Duplicate }
 

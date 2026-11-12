@@ -1,4 +1,4 @@
-﻿using WorkGreg.Contracts;
+using WorkGreg.Contracts;
 using WorkGreg.Domain;
 using WorkGreg.Services;
 
@@ -14,6 +14,7 @@ public sealed class InProcessWorkGregClient(
     SettingsService settings,
     JobService jobs,
     AutofillService autofill,
+    ApplicationService applications,
     ManualCheckTracker checks) : IWorkGregClient
 {
     // ---- catalog and limits
@@ -116,6 +117,20 @@ public sealed class InProcessWorkGregClient(
     public async Task<Result<AutofillSettingsDto, Error>> CopyAutofillAsync(
         long chatId, int fromProfileId, int toProfileId, CancellationToken ct) =>
         (await autofill.CopySettingsAsync(chatId, fromProfileId, toProfileId, ct)).Map(s => s.ToDto());
+
+    // ---- applications
+
+    public async Task<Result<AutofillPreviewDto, Error>> StartAutofillAsync(long chatId, int deliveryId, CancellationToken ct) =>
+        (await applications.PreviewAsync(chatId, deliveryId, ct)).Map(p => p.ToDto());
+
+    public async Task<Result<ApplicationDto, Error>> MarkAppliedAsync(long chatId, int deliveryId, CancellationToken ct) =>
+        (await applications.MarkAppliedAsync(chatId, deliveryId, ct)).Map(a => a.ToDto());
+
+    public async Task<Result<ApplicationDto, Error>> SkipAsync(long chatId, int deliveryId, CancellationToken ct) =>
+        (await applications.SkipAsync(chatId, deliveryId, ct)).Map(a => a.ToDto());
+
+    public async Task<Result<ApplicationDto, Error>> GetApplicationAsync(long chatId, int applicationId, CancellationToken ct) =>
+        (await applications.GetAsync(chatId, applicationId, ct)).Map(a => a.ToDto());
 
     // ---- sources
 

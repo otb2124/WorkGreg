@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using WorkGreg.Client;
 using WorkGreg.Contracts;
 using static WorkGreg.Telegram.MenuKit;
@@ -34,6 +34,7 @@ internal sealed class ProfileScreen(IWorkGregClient client, ProfilesScreen profi
         sb.AppendLine($"Status: {(p.Enabled ? "▶️ active" : "⏸ disabled (not fetched, nothing delivered)")}");
         sb.AppendLine($"🔎 Keyword: {Html(p.Keyword)}");
         sb.AppendLine($"🎯 Filters: {ActiveFilterCount(p)} active");
+        sb.AppendLine($"🧩 AutoFill: {(p.AutofillReady ? "✅ ready" : "<i>not set up</i>")}");
 
         if (attached.Count == 0)
         {
@@ -57,6 +58,7 @@ internal sealed class ProfileScreen(IWorkGregClient client, ProfilesScreen profi
             Row(Btn("✏️ Keyword", CallbackData.Ask(PromptKind.Keyword, p.Id)),
                 Btn("🏷 Rename", CallbackData.Ask(PromptKind.Rename, p.Id))),
             Row(Btn("📡 Sources", CallbackData.Sources(p.Id)), Btn("🎯 Filters", CallbackData.Filters(p.Id))),
+            Row(Btn("🧩 AutoFill", CallbackData.Autofill(p.Id))),
             Row(Btn(p.Enabled ? "⏸ Disable" : "▶️ Enable", CallbackData.ToggleEnabled(p.Id, !p.Enabled))),
             Row(Btn("🗑 Remove profile", CallbackData.RemoveAsk(p.Id)), Btn("⬅ Back", CallbackData.Profiles)));
 

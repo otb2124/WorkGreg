@@ -1,4 +1,4 @@
-﻿using global::Telegram.Bot;
+using global::Telegram.Bot;
 using global::Telegram.Bot.Exceptions;
 using global::Telegram.Bot.Polling;
 using global::Telegram.Bot.Types;
@@ -46,6 +46,8 @@ internal sealed class UpdateDispatcher(
                 await HandleCallbackAsync(cq, ct);
             else if (update.Message is { Text: not null } message)
                 await HandleMessageAsync(message, ct);
+            else if (update.Message is { Document: not null } fileMessage)
+                await HandleFileAsync(fileMessage, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -111,19 +113,7 @@ internal sealed class UpdateDispatcher(
         var chatId = message.Chat.Id;
         var text = message.Text!;
 
-        if (!options.Value.IsAllowed(chatId))
-        {
-            log.LogWarning("Ignoring message from unauthorized chat {ChatId}", chatId);
-            return;   // no reply sent
-        }
-
-        var admission = limiter.TryAcquire(chatId);
-        if (!admission.Allowed)
-        {
-            LogLimited(chatId, admission);
-            if (admission.Notify) await io.ReplyAsync(chatId, Replies.RateLimited(admission.RetryAfter), ct);
-            return;
-        }
+        if (!await AdmitAsync(chatId, ct)) return;
 
         using var scope = scopes.CreateScope();
 
@@ -135,6 +125,26 @@ internal sealed class UpdateDispatcher(
         }
 
         await HandlePlainTextAsync(scope.ServiceProvider, message, ct);
+    }
+
+    /// <summary>Chats that are not allowed, and chats that send too much, are dropped here. False: the message is finished.</summary>
+    private async Task<bool> AdmitAsync(long chatId, CancellationToken ct)
+    {
+        if (!options.Value.IsAllowed(chatId))
+        {
+            log.LogWarning("Ignoring message from unauthorized chat {ChatId}", chatId);
+            return false;   // no reply sent
+        }
+
+        var admission = limiter.TryAcquire(chatId);
+        if (!admission.Allowed)
+        {
+            LogLimited(chatId, admission);
+            if (admission.Notify) await io.ReplyAsync(chatId, Replies.RateLimited(admission.RetryAfter), ct);
+            return false;
+        }
+
+        return true;
     }
 
     private async Task RunCommandAsync(IServiceProvider services, long chatId, CommandLine line, string text, CancellationToken ct)
@@ -171,7 +181,7 @@ internal sealed class UpdateDispatcher(
         {
             // When the core is down the answer was not saved, so the prompt stays and the user can simply send it again.
             if (!CoreOutage.IsOutage(ex)) pending.Clear(chatId);
-            await io.ReplyAsync(chatId, FailureReply(ex, $"Text input {text}"), ct);
+            await io.ReplyAsync(chatId, FailureReply(ex, "Text input"), ct);
             return;
         }
 
@@ -184,6 +194,47 @@ internal sealed class UpdateDispatcher(
 
         await io.EditScreenAsync(chatId, result.MessageId, result.Screen, ct);
         await io.TryDeleteAsync(chatId, message.MessageId, ct);   // keep the chat clean
+    }
+
+    // ------------------------------------------------------------------ files
+
+    /// <summary>
+    /// A file is only ever the answer to a prompt (the CV). With no prompt waiting it is not stored; the user is told where to add a CV.
+    /// Like plain text, a file that was taken (or refused with a reason) is deleted from the chat afterwards.
+    /// </summary>
+    private async Task HandleFileAsync(Message message, CancellationToken ct)
+    {
+        var chatId = message.Chat.Id;
+        if (!await AdmitAsync(chatId, ct)) return;
+
+        var document = message.Document!;
+        var upload = new IncomingDocument(document.FileId, document.FileName, document.MimeType, document.FileSize);
+
+        using var scope = scopes.CreateScope();
+
+        TextResult? result;
+        try
+        {
+            result = await scope.ServiceProvider.GetRequiredService<PendingInputHandler>().HandleDocumentAsync(chatId, upload, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // When the core is down the file was not saved, so the prompt stays and the user can simply send it again.
+            if (!CoreOutage.IsOutage(ex)) pending.Clear(chatId);
+            await io.ReplyAsync(chatId, FailureReply(ex, "File input"), ct);
+            return;
+        }
+
+        if (result is null)
+        {
+            var main = scope.ServiceProvider.GetRequiredService<MainScreen>();
+            await io.SendScreenAsync(chatId,
+                await main.RenderAsync(chatId, "To add a CV open a profile → 🧩 AutoFill → 📎 Upload CV.", ct), ct);
+            return;
+        }
+
+        await io.EditScreenAsync(chatId, result.MessageId, result.Screen, ct);
+        await io.TryDeleteAsync(chatId, message.MessageId, ct);
     }
 
     // ------------------------------------------------------------------ button taps

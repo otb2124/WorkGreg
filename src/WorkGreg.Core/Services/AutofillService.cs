@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using WorkGreg.Data;
 using WorkGreg.Domain;
@@ -42,7 +42,14 @@ public sealed class AutofillService(AppDb db)
     /// Ids of this chat's profiles that have a first name, last name and email stored: the profiles whose vacancies get
     /// the AutoFill button. One query for all profiles, so callers do not ask once per vacancy.
     /// </summary>
-    public async Task<IReadOnlySet<int>> ReadyProfileIdsAsync(long chatId, CancellationToken ct)
+    public Task<IReadOnlySet<int>> ReadyProfileIdsAsync(long chatId, CancellationToken ct) =>
+        LoadReadyProfileIdsAsync(db, chatId, ct);
+
+    /// <summary>
+    /// <see cref="ReadyProfileIdsAsync"/> for callers that hold an <see cref="AppDb"/> but no scoped service (the delivery pass
+    /// loads it once per pass and reuses it for every vacancy of that pass).
+    /// </summary>
+    public static async Task<IReadOnlySet<int>> LoadReadyProfileIdsAsync(AppDb db, long chatId, CancellationToken ct)
     {
         var ids = await db.AutofillFields.AsNoTracking()
             .Where(f => f.SearchProfile.OwnerChatId == chatId

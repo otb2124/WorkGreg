@@ -140,6 +140,20 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
         SendAsync<AutofillSettingsDto>(HttpMethod.Post, $"{Autofill(chatId, toProfileId)}/copy",
             new CopyAutofillRequest(fromProfileId), ct);
 
+    // ---- applications
+
+    public Task<Result<AutofillPreviewDto, Error>> StartAutofillAsync(long chatId, int deliveryId, CancellationToken ct) =>
+        SendAsync<AutofillPreviewDto>(HttpMethod.Post, $"{Chat(chatId)}/deliveries/{deliveryId}/autofill", null, ct);
+
+    public Task<Result<ApplicationDto, Error>> MarkAppliedAsync(long chatId, int deliveryId, CancellationToken ct) =>
+        SendAsync<ApplicationDto>(HttpMethod.Post, $"{Chat(chatId)}/deliveries/{deliveryId}/applied", null, ct);
+
+    public Task<Result<ApplicationDto, Error>> SkipAsync(long chatId, int deliveryId, CancellationToken ct) =>
+        SendAsync<ApplicationDto>(HttpMethod.Post, $"{Chat(chatId)}/deliveries/{deliveryId}/skip", null, ct);
+
+    public Task<Result<ApplicationDto, Error>> GetApplicationAsync(long chatId, int applicationId, CancellationToken ct) =>
+        SendAsync<ApplicationDto>(HttpMethod.Get, $"{Chat(chatId)}/applications/{applicationId}", null, ct);
+
     // ---- user settings
     public async Task<OverviewDto> GetOverviewAsync(long chatId, CancellationToken ct) =>
         Unwrap(await SendAsync<OverviewDto>(HttpMethod.Get, $"{Chat(chatId)}/overview", null, ct));

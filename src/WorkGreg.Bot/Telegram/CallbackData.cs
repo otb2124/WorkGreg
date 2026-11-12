@@ -1,6 +1,8 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
+using WorkGreg.Contracts;
+using WorkGreg.Domain;
 
 namespace WorkGreg.Telegram;
 
@@ -9,6 +11,10 @@ internal enum CallbackAction
 {
     // screens
     Home, Help, Profiles, Profile, Filters, Sources, Delivery, DeliveryHourPicker,
+    // autofill: its screens (settings, custom answers, one answer, copy picker) and the buttons that change it
+    Autofill, AutofillRules, AutofillRule, AutofillCopy, AutofillClearValue, AutofillDeleteRule, AutofillDeleteDoc,
+    // the buttons under a delivered vacancy: 🤖 AutoFill, ✅ Applied, ⏭ Skip (they carry a delivery id)
+    AutofillStart, VacancyApplied, VacancySkip,
     // confirmations
     ResendAsk, RemoveAsk,
     // changes
@@ -20,11 +26,26 @@ internal enum CallbackAction
 }
 
 /// <summary>Which value a prompt is waiting for.</summary>
-internal enum PromptKind { NewProfile, Keyword, Rename, Include, Exclude, Companies, Locations, MinSalary }
+internal enum PromptKind
+{
+    NewProfile, Keyword, Rename, Include, Exclude, Companies, Locations, MinSalary,
+    // autofill: one standard value (needs Key), a new custom answer, an existing one (needs ItemId), the CV file
+    AutofillValue, AutofillAddRule, AutofillEditRule, AutofillCv
+}
 
-/// <summary>A prompt: the kind of value, and the profile it belongs to (0 for a new profile).</summary>
+/// <summary>
+/// A prompt: the kind of value, and the profile it belongs to (0 for a new profile). The autofill prompts carry one more
+/// piece: <see cref="Key"/> for a standard value, <see cref="ItemId"/> (the rule id) for an edited custom answer.
+/// Those two are not positional, so <c>var (kind, profileId) = target</c> keeps working.
+/// </summary>
 internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
 {
+    /// <summary>Only for <see cref="PromptKind.AutofillValue"/>: which standard value is being typed.</summary>
+    public AutofillKey? Key { get; init; }
+
+    /// <summary>Only for <see cref="PromptKind.AutofillEditRule"/>: the id of the custom answer being edited.</summary>
+    public int ItemId { get; init; }
+
     private static readonly (PromptKind Kind, string Code)[] Table =
     [
         (PromptKind.NewProfile, "newp"),
@@ -35,6 +56,10 @@ internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
         (PromptKind.Companies, "com"),
         (PromptKind.Locations, "loc"),
         (PromptKind.MinSalary, "sal"),
+        (PromptKind.AutofillValue, "afv"),
+        (PromptKind.AutofillAddRule, "afc"),
+        (PromptKind.AutofillEditRule, "afe"),
+        (PromptKind.AutofillCv, "afd"),
     ];
 
     private static readonly Dictionary<PromptKind, string> CodeOf = Table.ToDictionary(t => t.Kind, t => t.Code);
@@ -42,21 +67,31 @@ internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
 
     public static PromptTarget NewProfile() => new(PromptKind.NewProfile, 0);
 
+    /// <summary>The prompts of the autofill screens. They have their own handling (see PendingInputHandler), not a <see cref="Menu.PromptSpecs"/> row.</summary>
+    public bool IsAutofill => Kind is PromptKind.AutofillValue or PromptKind.AutofillAddRule
+        or PromptKind.AutofillEditRule or PromptKind.AutofillCv;
+
     /// <summary>Filter prompts can be cleared with the 🗑 button.</summary>
-    public bool IsFilter => Menu.PromptSpecs.Of(Kind).Clearable;
+    public bool IsFilter => !IsAutofill && Menu.PromptSpecs.Of(Kind).Clearable;
 
     /// <summary>The answer is a comma list (lines are joined with ", ").</summary>
-    public bool IsList => Menu.PromptSpecs.Of(Kind).IsList;
+    public bool IsList => !IsAutofill && Menu.PromptSpecs.Of(Kind).IsList;
 
-    /// <summary>"newp" or "kw:3".</summary>
-    public string Encode() => Kind == PromptKind.NewProfile ? CodeOf[Kind] : $"{CodeOf[Kind]}:{ProfileId}";
+    /// <summary>"newp", "kw:3", "afv:3:FirstName" or "afe:3:12".</summary>
+    public string Encode() => Kind switch
+    {
+        PromptKind.NewProfile => CodeOf[Kind],
+        PromptKind.AutofillValue => $"{CodeOf[Kind]}:{ProfileId}:{Key}",
+        PromptKind.AutofillEditRule => $"{CodeOf[Kind]}:{ProfileId}:{ItemId}",
+        _ => $"{CodeOf[Kind]}:{ProfileId}"
+    };
 
     public static bool TryParse(string? text, out PromptTarget target)
     {
         target = default;
         if (text is null) return false;
 
-        var bits = text.Split(':', 2);
+        var bits = text.Split(':', 3);
         if (!KindOf.TryGetValue(bits[0], out var kind)) return false;
 
         if (kind == PromptKind.NewProfile)
@@ -66,9 +101,25 @@ internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
             return true;
         }
 
-        if (bits.Length != 2 || !CallbackData.TryId(bits[1], out var id)) return false;
-        target = new PromptTarget(kind, id);
-        return true;
+        if (bits.Length < 2 || !CallbackData.TryId(bits[1], out var id)) return false;
+
+        switch (kind)
+        {
+            case PromptKind.AutofillValue:
+                if (bits.Length != 3 || !CallbackData.TryKey(bits[2], out var key)) return false;
+                target = new PromptTarget(kind, id) { Key = key };
+                return true;
+
+            case PromptKind.AutofillEditRule:
+                if (bits.Length != 3 || !CallbackData.TryId(bits[2], out var ruleId)) return false;
+                target = new PromptTarget(kind, id) { ItemId = ruleId };
+                return true;
+
+            default:
+                if (bits.Length != 2) return false;
+                target = new PromptTarget(kind, id);
+                return true;
+        }
     }
 }
 
@@ -89,6 +140,13 @@ internal readonly record struct PromptTarget(PromptKind Kind, int ProfileId)
 ///   ask:&lt;prompt&gt; | clr:&lt;prompt&gt;          prompt = newp | kw|nm|inc|exc|com|loc|sal:&lt;id&gt;
 ///   cancel:&lt;screen&gt;                      screen = home | pls | dlv | p:&lt;id&gt; | pf:&lt;id&gt; | ps:&lt;id&gt;[:&lt;region&gt;] | help
 ///   dlvh:&lt;hour&gt;
+///   afs:&lt;id&gt; | afl:&lt;id&gt; | afdd:&lt;id&gt;                autofill settings | custom answers | delete the CV
+///   afr:&lt;id&gt;:&lt;rule&gt; | afrd:&lt;id&gt;:&lt;rule&gt;          one custom answer | delete it
+///   afvd:&lt;id&gt;:&lt;key&gt;                          clear a standard value (key = AutofillKey name)
+///   afcp:&lt;id&gt;[:&lt;from&gt;]                        pick a profile to copy autofill from | copy it
+///   ask:afv:&lt;id&gt;:&lt;key&gt; | ask:afc:&lt;id&gt; | ask:afe:&lt;id&gt;:&lt;rule&gt; | ask:afd:&lt;id&gt;   autofill prompts
+///   af:&lt;delivery&gt; | ad:&lt;delivery&gt; | sk:&lt;delivery&gt;    under a delivered vacancy: AutoFill | Applied | Skip.
+///                                        The CORE builds these (DeliveryCallbacks, shared via Contracts), so they have no factory-only form.
 /// </summary>
 internal sealed record CallbackData(CallbackAction Action)
 {
@@ -109,6 +167,18 @@ internal sealed record CallbackData(CallbackAction Action)
 
     /// <summary>For <see cref="CallbackAction.Cancel"/>: the screen to go back to.</summary>
     public CallbackData? Back { get; init; }
+
+    /// <summary>The custom answer a button is about (<see cref="CallbackAction.AutofillRule"/>, <see cref="CallbackAction.AutofillDeleteRule"/>).</summary>
+    public int ItemId { get; init; }
+
+    /// <summary>For <see cref="CallbackAction.AutofillClearValue"/>: the standard value to clear.</summary>
+    public AutofillKey? Key { get; init; }
+
+    /// <summary>For <see cref="CallbackAction.AutofillCopy"/>: the profile to copy from. 0 while the user is still choosing one.</summary>
+    public int FromProfileId { get; init; }
+
+    /// <summary>For the buttons under a vacancy (<see cref="CallbackAction.AutofillStart"/>, <see cref="CallbackAction.VacancyApplied"/>, <see cref="CallbackAction.VacancySkip"/>): the vacancy's delivery id.</summary>
+    public int DeliveryId { get; init; }
 
     // ------------------------------------------------------------------ factories
 
@@ -148,9 +218,31 @@ internal sealed record CallbackData(CallbackAction Action)
     public static CallbackData Clear(PromptTarget target) => new(CallbackAction.Clear) { Prompt = target };
     public static CallbackData Cancel(CallbackData back) => new(CallbackAction.Cancel) { Back = back };
 
+    // autofill
+    public static CallbackData Autofill(int id) => new(CallbackAction.Autofill) { ProfileId = id };
+    public static CallbackData AutofillRules(int id) => new(CallbackAction.AutofillRules) { ProfileId = id };
+    public static CallbackData AutofillRule(int id, int ruleId) => new(CallbackAction.AutofillRule) { ProfileId = id, ItemId = ruleId };
+    public static CallbackData AutofillDeleteRule(int id, int ruleId) => new(CallbackAction.AutofillDeleteRule) { ProfileId = id, ItemId = ruleId };
+    public static CallbackData AutofillClearValue(int id, AutofillKey key) => new(CallbackAction.AutofillClearValue) { ProfileId = id, Key = key };
+    public static CallbackData AutofillDeleteDoc(int id) => new(CallbackAction.AutofillDeleteDoc) { ProfileId = id };
+    public static CallbackData AutofillCopy(int id, int fromId = 0) => new(CallbackAction.AutofillCopy) { ProfileId = id, FromProfileId = fromId };
+
+    // under a delivered vacancy
+    public static CallbackData AutofillStart(int deliveryId) => new(CallbackAction.AutofillStart) { DeliveryId = deliveryId };
+    public static CallbackData VacancyApplied(int deliveryId) => new(CallbackAction.VacancyApplied) { DeliveryId = deliveryId };
+    public static CallbackData VacancySkip(int deliveryId) => new(CallbackAction.VacancySkip) { DeliveryId = deliveryId };
+
+    public static CallbackData AskValue(int id, AutofillKey key) =>
+        Ask(new PromptTarget(PromptKind.AutofillValue, id) { Key = key });
+    public static CallbackData AskAddRule(int id) => Ask(PromptKind.AutofillAddRule, id);
+    public static CallbackData AskEditRule(int id, int ruleId) =>
+        Ask(new PromptTarget(PromptKind.AutofillEditRule, id) { ItemId = ruleId });
+    public static CallbackData AskCv(int id) => Ask(PromptKind.AutofillCv, id);
+
     /// <summary>The actions that open a screen. "Cancel" can only go back to one of these.</summary>
     public bool IsScreen => Action is CallbackAction.Home or CallbackAction.Help or CallbackAction.Profiles
-        or CallbackAction.Profile or CallbackAction.Filters or CallbackAction.Sources or CallbackAction.Delivery;
+        or CallbackAction.Profile or CallbackAction.Filters or CallbackAction.Sources or CallbackAction.Delivery
+        or CallbackAction.Autofill or CallbackAction.AutofillRules or CallbackAction.AutofillRule;
 
     // ------------------------------------------------------------------ wire format
 
@@ -164,6 +256,16 @@ internal sealed record CallbackData(CallbackAction Action)
         (CallbackAction.Sources, "ps"),
         (CallbackAction.Delivery, "dlv"),
         (CallbackAction.DeliveryHourPicker, "dlvd"),
+        (CallbackAction.Autofill, "afs"),
+        (CallbackAction.AutofillRules, "afl"),
+        (CallbackAction.AutofillRule, "afr"),
+        (CallbackAction.AutofillCopy, "afcp"),
+        (CallbackAction.AutofillClearValue, "afvd"),
+        (CallbackAction.AutofillDeleteRule, "afrd"),
+        (CallbackAction.AutofillDeleteDoc, "afdd"),
+        (CallbackAction.AutofillStart, DeliveryCallbacks.AutofillCode),
+        (CallbackAction.VacancyApplied, DeliveryCallbacks.AppliedCode),
+        (CallbackAction.VacancySkip, DeliveryCallbacks.SkipCode),
         (CallbackAction.ResendAsk, "rst"),
         (CallbackAction.RemoveAsk, "pdel"),
         (CallbackAction.ResendConfirm, "rstok"),
@@ -205,7 +307,14 @@ internal sealed record CallbackData(CallbackAction Action)
                 Desired is { } want ? $"{code}:{ProfileId}:{(want ? 1 : 0)}" : $"{code}:{ProfileId}",
 
             CallbackAction.Profile or CallbackAction.Filters
-                or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm => $"{code}:{ProfileId}",
+                or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm
+                or CallbackAction.Autofill or CallbackAction.AutofillRules or CallbackAction.AutofillDeleteDoc => $"{code}:{ProfileId}",
+
+            CallbackAction.AutofillStart or CallbackAction.VacancyApplied or CallbackAction.VacancySkip => $"{code}:{DeliveryId}",
+
+            CallbackAction.AutofillRule or CallbackAction.AutofillDeleteRule => $"{code}:{ProfileId}:{ItemId}",
+            CallbackAction.AutofillClearValue => $"{code}:{ProfileId}:{Key}",
+            CallbackAction.AutofillCopy => FromProfileId == 0 ? $"{code}:{ProfileId}" : $"{code}:{ProfileId}:{FromProfileId}",
 
             CallbackAction.Sources => Region is null ? $"{code}:{ProfileId}" : $"{code}:{ProfileId}:{Region}",
 
@@ -248,6 +357,16 @@ internal sealed record CallbackData(CallbackAction Action)
                && id > 0;
     }
 
+    /// <summary>An <see cref="AutofillKey"/> by its name, as <see cref="Encode"/> writes it. Numbers and unknown names are refused.</summary>
+    internal static bool TryKey(string? text, out AutofillKey key)
+    {
+        key = default;
+        return !string.IsNullOrEmpty(text)
+               && !char.IsDigit(text[0])
+               && Enum.TryParse(text, ignoreCase: false, out key)
+               && Enum.IsDefined(key);
+    }
+
     /// <param name="arg">Everything after the first ":", or null when there was no ":".</param>
     private static CallbackData? Build(CallbackAction action, string? arg)
     {
@@ -269,9 +388,40 @@ internal sealed record CallbackData(CallbackAction Action)
                         : null;
                 }
 
-            case CallbackAction.Profile or CallbackAction.Filters or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm:
+            case CallbackAction.Profile or CallbackAction.Filters or CallbackAction.RemoveAsk or CallbackAction.RemoveConfirm
+                or CallbackAction.Autofill or CallbackAction.AutofillRules or CallbackAction.AutofillDeleteDoc:
                 {
                     return TryId(arg, out var id) ? new CallbackData(action) { ProfileId = id } : null;
+                }
+
+            case CallbackAction.AutofillStart or CallbackAction.VacancyApplied or CallbackAction.VacancySkip:
+                {
+                    return TryId(arg, out var deliveryId) ? new CallbackData(action) { DeliveryId = deliveryId } : null;
+                }
+
+            case CallbackAction.AutofillRule or CallbackAction.AutofillDeleteRule:
+                {
+                    var bits = arg?.Split(':', 2);
+                    return bits is { Length: 2 } && TryId(bits[0], out var id) && TryId(bits[1], out var ruleId)
+                        ? new CallbackData(action) { ProfileId = id, ItemId = ruleId }
+                        : null;
+                }
+
+            case CallbackAction.AutofillClearValue:
+                {
+                    var bits = arg?.Split(':', 2);
+                    return bits is { Length: 2 } && TryId(bits[0], out var id) && TryKey(bits[1], out var key)
+                        ? AutofillClearValue(id, key)
+                        : null;
+                }
+
+            case CallbackAction.AutofillCopy:
+                {
+                    var bits = arg?.Split(':', 2);
+                    if (bits is null || !TryId(bits[0], out var id)) return null;
+                    if (bits.Length == 1) return AutofillCopy(id);
+
+                    return TryId(bits[1], out var source) ? AutofillCopy(id, source) : null;
                 }
 
             case CallbackAction.Sources:
@@ -317,3 +467,4 @@ internal sealed record CallbackData(CallbackAction Action)
         }
     }
 }
+

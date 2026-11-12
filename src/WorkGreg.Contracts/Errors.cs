@@ -43,6 +43,11 @@ public static class ErrorCodes
     public const string AutofillDocumentNameInvalid = "autofill.document_name_invalid";
     public const string AutofillCopySameProfile = "autofill.copy_same_profile";
     public const string AutofillConflict = "autofill.conflict";
+
+    // ---- applications
+    public const string DeliveryNotFound = "delivery.not_found";
+    public const string ApplicationNotFound = "application.not_found";
+    public const string ApplicationStateConflict = "application.state_conflict";
 }
 
 /// <summary>
@@ -140,6 +145,21 @@ public static class Errors
 
     public static Error AutofillConflict { get; } =
         Error.Conflict(ErrorCodes.AutofillConflict, "The settings changed at the same moment. Please try again.");
+
+    // ---- applications
+
+    /// <summary>Also the answer for a vacancy that belongs to somebody else: the two are not told apart.</summary>
+    public static Error DeliveryNotFound { get; } =
+        Error.NotFound(ErrorCodes.DeliveryNotFound, "That vacancy is no longer available.");
+
+    public static Error ApplicationNotFound { get; } =
+        Error.NotFound(ErrorCodes.ApplicationNotFound, "No such application.");
+
+    public static Error ApplicationStateConflict(string status) =>
+        Error.Conflict(
+            ErrorCodes.ApplicationStateConflict,
+            $"This vacancy is already marked as {status}.",
+            Error.Arg("status", status));
 
     // ---- front-end input
 
