@@ -13,6 +13,7 @@ public sealed class InProcessWorkGregClient(
     SourceService sources,
     SettingsService settings,
     JobService jobs,
+    AutofillService autofill,
     ManualCheckTracker checks) : IWorkGregClient
 {
     // ---- catalog and limits
@@ -27,11 +28,22 @@ public sealed class InProcessWorkGregClient(
 
     // ---- profiles
 
-    public async Task<IReadOnlyList<ProfileDto>> ListProfilesAsync(long chatId, CancellationToken ct) =>
-        (await profiles.ListAsync(chatId, ct)).Select(d => d.ToDto()).ToList();
+    public async Task<IReadOnlyList<ProfileDto>> ListProfilesAsync(long chatId, CancellationToken ct)
+    {
+        // Awaited one after the other: a scoped DbContext cannot run two queries at once.
+        var details = await profiles.ListAsync(chatId, ct);
+        var ready = await autofill.ReadyProfileIdsAsync(chatId, ct);
+        return details.Select(d => d.ToDto(ready.Contains(d.Profile.Id))).ToList();
+    }
 
-    public async Task<Result<ProfileDto, Error>> GetProfileAsync(long chatId, int id, CancellationToken ct) =>
-        (await profiles.GetAsync(chatId, id, ct)).Map(d => d.ToDto());
+    public async Task<Result<ProfileDto, Error>> GetProfileAsync(long chatId, int id, CancellationToken ct)
+    {
+        var details = await profiles.GetAsync(chatId, id, ct);
+        if (details.IsFailure) return details.Error;
+
+        var ready = await autofill.ReadyProfileIdsAsync(chatId, ct);
+        return details.Value.ToDto(ready.Contains(id));
+    }
 
     public async Task<Result<ProfileDto, Error>> CreateProfileAsync(long chatId, string keyword, CancellationToken ct) =>
         (await profiles.CreateAsync(chatId, new ProfileDraft(keyword), ct)).Map(p => p.ToDto([]));
@@ -67,6 +79,43 @@ public sealed class InProcessWorkGregClient(
 
     public Task<Result<ProfileDto, Error>> SetRemoteOnlyAsync(long chatId, int id, bool remoteOnly, CancellationToken ct) =>
         ReloadAsync(chatId, profiles.SetRemoteOnlyAsync(chatId, id, remoteOnly, ct), ct);
+
+    // ---- autofill
+
+    public async Task<Result<AutofillSettingsDto, Error>> GetAutofillAsync(long chatId, int profileId, CancellationToken ct) =>
+        (await autofill.GetSettingsAsync(chatId, profileId, ct)).Map(s => s.ToDto());
+
+    public Task<Result<AutofillSettingsDto, Error>> SetAutofillValueAsync(
+        long chatId, int profileId, AutofillKey key, string? value, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.SetStandardFieldAsync(chatId, profileId, key, value, ct), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> ClearAutofillValueAsync(
+        long chatId, int profileId, AutofillKey key, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.ClearStandardFieldAsync(chatId, profileId, key, ct), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> AddAutofillRuleAsync(
+        long chatId, int profileId, AutofillRuleRequest rule, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.AddCustomRuleAsync(chatId, profileId, ToDraft(rule), ct), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> UpdateAutofillRuleAsync(
+        long chatId, int profileId, int ruleId, AutofillRuleRequest rule, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.UpdateCustomRuleAsync(chatId, profileId, ruleId, ToDraft(rule), ct), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> DeleteAutofillRuleAsync(
+        long chatId, int profileId, int ruleId, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.DeleteCustomRuleAsync(chatId, profileId, ruleId, ct), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> SetAutofillDocumentAsync(
+        long chatId, int profileId, AutofillDocumentKind kind, string fileName, byte[] content, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.SetDocumentAsync(chatId, profileId, kind, fileName, content, ct), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> DeleteAutofillDocumentAsync(
+        long chatId, int profileId, AutofillDocumentKind kind, CancellationToken ct) =>
+        ReloadAutofillAsync(chatId, profileId, autofill.DeleteDocumentAsync(chatId, profileId, kind, ct), ct);
+
+    public async Task<Result<AutofillSettingsDto, Error>> CopyAutofillAsync(
+        long chatId, int fromProfileId, int toProfileId, CancellationToken ct) =>
+        (await autofill.CopySettingsAsync(chatId, fromProfileId, toProfileId, ct)).Map(s => s.ToDto());
 
     // ---- sources
 
@@ -128,4 +177,16 @@ public sealed class InProcessWorkGregClient(
 
         return await GetProfileAsync(chatId, changed.Value.Id, ct);
     }
+
+    /// <summary>After an autofill change, read the settings again so the answer is the state afterwards.</summary>
+    private async Task<Result<AutofillSettingsDto, Error>> ReloadAutofillAsync<T>(
+        long chatId, int profileId, Task<Result<T, Error>> change, CancellationToken ct)
+    {
+        var changed = await change;
+        if (changed.IsFailure) return changed.Error;
+
+        return await GetAutofillAsync(chatId, profileId, ct);
+    }
+
+    private static CustomRuleDraft ToDraft(AutofillRuleRequest r) => new(r.Pattern, r.Value, r.IsRegex, r.MatchBy);
 }

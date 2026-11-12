@@ -56,6 +56,24 @@ public interface IWorkGregClient
     Task<Result<ProfileDto, Error>> SetMinSalaryAsync(long chatId, int id, int? salary, CancellationToken ct);
     Task<Result<ProfileDto, Error>> SetRemoteOnlyAsync(long chatId, int id, bool remoteOnly, CancellationToken ct);
 
+    // ---- autofill settings of a profile. Every call answers with the settings as they are afterwards.
+
+    Task<Result<AutofillSettingsDto, Error>> GetAutofillAsync(long chatId, int profileId, CancellationToken ct);
+    Task<Result<AutofillSettingsDto, Error>> SetAutofillValueAsync(long chatId, int profileId, AutofillKey key, string? value, CancellationToken ct);
+    Task<Result<AutofillSettingsDto, Error>> ClearAutofillValueAsync(long chatId, int profileId, AutofillKey key, CancellationToken ct);
+    Task<Result<AutofillSettingsDto, Error>> AddAutofillRuleAsync(long chatId, int profileId, AutofillRuleRequest rule, CancellationToken ct);
+    Task<Result<AutofillSettingsDto, Error>> UpdateAutofillRuleAsync(long chatId, int profileId, int ruleId, AutofillRuleRequest rule, CancellationToken ct);
+    Task<Result<AutofillSettingsDto, Error>> DeleteAutofillRuleAsync(long chatId, int profileId, int ruleId, CancellationToken ct);
+
+    /// <summary>Stores the file (PDF or DOCX, max 5 MB), replacing the profile's previous one of that kind.</summary>
+    Task<Result<AutofillSettingsDto, Error>> SetAutofillDocumentAsync(
+        long chatId, int profileId, AutofillDocumentKind kind, string fileName, byte[] content, CancellationToken ct);
+
+    Task<Result<AutofillSettingsDto, Error>> DeleteAutofillDocumentAsync(long chatId, int profileId, AutofillDocumentKind kind, CancellationToken ct);
+
+    /// <summary>Replaces the target profile's autofill settings with a copy of the source profile's. Answers with the target's settings.</summary>
+    Task<Result<AutofillSettingsDto, Error>> CopyAutofillAsync(long chatId, int fromProfileId, int toProfileId, CancellationToken ct);
+
     // ---- sources of a profile (addressed by provider id)
 
     Task<Result<SourceChangeDto, Error>> AddSourceAsync(long chatId, int profileId, string? providerId, CancellationToken ct);

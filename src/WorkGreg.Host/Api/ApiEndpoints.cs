@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.AspNetCore.Http.Features;
 using WorkGreg.Client;
 using WorkGreg.Contracts;
 using WorkGreg.Domain;
@@ -34,6 +35,17 @@ public static class ApiEndpoints
         user.MapPut("/profiles/{id:int}", UpdateProfile);
         user.MapPatch("/profiles/{id:int}", PatchProfile);
         user.MapDelete("/profiles/{id:int}", RemoveProfile);
+
+        // Autofill settings of a profile (all inside the /{chatId} group, so ChatAccessFilter applies; the service checks ownership).
+        user.MapGet("/profiles/{id:int}/autofill", GetAutofill);
+        user.MapPut("/profiles/{id:int}/autofill/fields/{key}", SetAutofillValue);
+        user.MapDelete("/profiles/{id:int}/autofill/fields/{key}", ClearAutofillValue);
+        user.MapPost("/profiles/{id:int}/autofill/rules", AddAutofillRule);
+        user.MapPut("/profiles/{id:int}/autofill/rules/{ruleId:int}", UpdateAutofillRule);
+        user.MapDelete("/profiles/{id:int}/autofill/rules/{ruleId:int}", DeleteAutofillRule);
+        user.MapPost("/profiles/{id:int}/autofill/documents/{kind}", SetAutofillDocument);
+        user.MapDelete("/profiles/{id:int}/autofill/documents/{kind}", DeleteAutofillDocument);
+        user.MapPost("/profiles/{id:int}/autofill/copy", CopyAutofill);
 
         user.MapPost("/profiles/{id:int}/sources", AddSource);
         user.MapPatch("/profiles/{id:int}/sources/{sourceId:int}", UpdateSource);
@@ -111,11 +123,12 @@ public static class ApiEndpoints
 
     // ---- Profiles
 
-    private static async Task<IResult> ListProfiles(long chatId, ProfileService profiles, CancellationToken ct) =>
-        Results.Ok((await profiles.ListAsync(chatId, ct)).Select(d => d.ToDto()));
+    // Listing and reading go through the client, which also fills ProfileDto.AutofillReady.
+    private static async Task<IResult> ListProfiles(long chatId, IWorkGregClient client, CancellationToken ct) =>
+        Results.Ok(await client.ListProfilesAsync(chatId, ct));
 
-    private static async Task<IResult> GetProfile(long chatId, int id, ProfileService profiles, CancellationToken ct) =>
-        (await profiles.GetAsync(chatId, id, ct)).ToHttp(d => Results.Ok(d.ToDto()));
+    private static async Task<IResult> GetProfile(long chatId, int id, IWorkGregClient client, CancellationToken ct) =>
+        (await client.GetProfileAsync(chatId, id, ct)).ToHttp(Results.Ok);
 
     private static async Task<IResult> AddProfile(
         long chatId, ProfileRequest req, ProfileService profiles, CancellationToken ct) =>
@@ -124,8 +137,14 @@ public static class ApiEndpoints
 
     /// <summary>Replaces all profile fields at once. A changed keyword is pushed to every source of the profile.</summary>
     private static async Task<IResult> UpdateProfile(
-        long chatId, int id, ProfileRequest req, ProfileService profiles, CancellationToken ct) =>
-        (await profiles.ReplaceAsync(chatId, id, ToDraft(req), ct)).ToHttp(d => Results.Ok(d.ToDto()));
+        long chatId, int id, ProfileRequest req, ProfileService profiles, AutofillService autofill, CancellationToken ct)
+    {
+        var replaced = await profiles.ReplaceAsync(chatId, id, ToDraft(req), ct);
+        if (replaced.IsFailure) return replaced.Error.ToHttp();
+
+        var ready = await autofill.ReadyProfileIdsAsync(chatId, ct);
+        return Results.Ok(replaced.Value.ToDto(ready.Contains(id)));
+    }
 
     private const string PatchableFields = "name, keyword, enabled, include, exclude, companies, locations, minSalary, remoteOnly";
 
@@ -227,6 +246,107 @@ public static class ApiEndpoints
     /// <summary>Answers with the removed profile (its name is what a client shows in its confirmation).</summary>
     private static async Task<IResult> RemoveProfile(long chatId, int id, ProfileService profiles, CancellationToken ct) =>
         (await profiles.RemoveAsync(chatId, id, ct)).ToHttp(p => Results.Ok(p.ToDto([])));
+
+    // ---- Autofill settings of a profile. Every call answers with the settings as they are afterwards.
+
+    private static async Task<IResult> GetAutofill(long chatId, int id, IWorkGregClient client, CancellationToken ct) =>
+        (await client.GetAutofillAsync(chatId, id, ct)).ToHttp(Results.Ok);
+
+    private static async Task<IResult> SetAutofillValue(
+        long chatId, int id, string key, SetAutofillValueRequest req, IWorkGregClient client, CancellationToken ct)
+    {
+        if (ParseEnum<AutofillKey>(key) is not { } k) return UnknownKey(key);
+        return (await client.SetAutofillValueAsync(chatId, id, k, req.Value, ct)).ToHttp(Results.Ok);
+    }
+
+    private static async Task<IResult> ClearAutofillValue(
+        long chatId, int id, string key, IWorkGregClient client, CancellationToken ct)
+    {
+        if (ParseEnum<AutofillKey>(key) is not { } k) return UnknownKey(key);
+        return (await client.ClearAutofillValueAsync(chatId, id, k, ct)).ToHttp(Results.Ok);
+    }
+
+    private static async Task<IResult> AddAutofillRule(
+        long chatId, int id, AutofillRuleRequest req, IWorkGregClient client, CancellationToken ct) =>
+        (await client.AddAutofillRuleAsync(chatId, id, req, ct)).ToHttp(Results.Ok);
+
+    private static async Task<IResult> UpdateAutofillRule(
+        long chatId, int id, int ruleId, AutofillRuleRequest req, IWorkGregClient client, CancellationToken ct) =>
+        (await client.UpdateAutofillRuleAsync(chatId, id, ruleId, req, ct)).ToHttp(Results.Ok);
+
+    private static async Task<IResult> DeleteAutofillRule(
+        long chatId, int id, int ruleId, IWorkGregClient client, CancellationToken ct) =>
+        (await client.DeleteAutofillRuleAsync(chatId, id, ruleId, ct)).ToHttp(Results.Ok);
+
+    /// <summary>
+    /// multipart/form-data with the file in a field named "file". The body is capped while it is read (the limit is set before
+    /// the form is parsed), so an oversized upload is stopped early instead of being buffered. The service then checks the
+    /// size again, the extension and the file's first bytes.
+    /// </summary>
+    private static async Task<IResult> SetAutofillDocument(
+        long chatId, int id, string kind, HttpContext http, IWorkGregClient client, CancellationToken ct)
+    {
+        if (ParseEnum<AutofillDocumentKind>(kind) is not { } documentKind)
+            return Errors.InvalidRequest($"Unknown document kind '{kind}'. Kinds: {string.Join(", ", Enum.GetNames<AutofillDocumentKind>())}.").ToHttp();
+
+        var request = http.Request;
+        if (!request.HasFormContentType)
+            return Errors.InvalidRequest("Send the file as multipart/form-data in a field named 'file'.").ToHttp();
+
+        // The file plus some room for the multipart framing.
+        const long bodyLimit = AutofillLimits.MaxDocumentBytes + 64 * 1024;
+        var tooLarge = Errors.AutofillDocumentTooLarge(AutofillLimits.MaxDocumentBytes / (1024 * 1024)).ToHttp();
+
+        if (request.ContentLength > bodyLimit) return tooLarge;
+        if (http.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+            limit.MaxRequestBodySize = bodyLimit;
+
+        IFormFile? file;
+        try
+        {
+            file = (await request.ReadFormAsync(ct)).Files.GetFile("file");
+        }
+        catch (BadHttpRequestException)
+        {
+            return tooLarge;   // the body went over the limit while it was being read
+        }
+        catch (InvalidDataException)
+        {
+            return Errors.InvalidRequest("The upload could not be read.").ToHttp();
+        }
+
+        if (file is null) return Errors.InvalidRequest("Send the file in a form field named 'file'.").ToHttp();
+        if (file.Length > AutofillLimits.MaxDocumentBytes) return tooLarge;
+
+        var bytes = new byte[file.Length];
+        await using (var stream = file.OpenReadStream())
+            await stream.ReadExactlyAsync(bytes, ct);
+
+        return (await client.SetAutofillDocumentAsync(chatId, id, documentKind, file.FileName, bytes, ct)).ToHttp(Results.Ok);
+    }
+
+    private static async Task<IResult> DeleteAutofillDocument(
+        long chatId, int id, string kind, IWorkGregClient client, CancellationToken ct)
+    {
+        if (ParseEnum<AutofillDocumentKind>(kind) is not { } documentKind)
+            return Errors.InvalidRequest($"Unknown document kind '{kind}'. Kinds: {string.Join(", ", Enum.GetNames<AutofillDocumentKind>())}.").ToHttp();
+
+        return (await client.DeleteAutofillDocumentAsync(chatId, id, documentKind, ct)).ToHttp(Results.Ok);
+    }
+
+    /// <summary>The route's {id} is the TARGET profile; its settings are replaced by a copy of the source's.</summary>
+    private static async Task<IResult> CopyAutofill(
+        long chatId, int id, CopyAutofillRequest req, IWorkGregClient client, CancellationToken ct) =>
+        (await client.CopyAutofillAsync(chatId, req.FromProfileId, id, ct)).ToHttp(Results.Ok);
+
+    /// <summary>A name from the URL to an enum value (case-insensitive). Numbers are refused: only names are part of the API.</summary>
+    private static T? ParseEnum<T>(string? raw) where T : struct, Enum =>
+        !string.IsNullOrWhiteSpace(raw) && !char.IsDigit(raw.Trim()[0]) && Enum.TryParse<T>(raw.Trim(), ignoreCase: true, out var value) && Enum.IsDefined(value)
+            ? value
+            : null;
+
+    private static IResult UnknownKey(string key) =>
+        Errors.InvalidRequest($"Unknown autofill key '{key}'. Keys: {string.Join(", ", Enum.GetNames<AutofillKey>())}.").ToHttp();
 
     // ---- Sources of a profile
 

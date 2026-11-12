@@ -89,12 +89,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<SourceService>();
         services.AddScoped<SettingsService>();
         services.AddScoped<JobService>();
+        services.AddScoped<AutofillService>();   // <-- add this
 
         // The bot's only door into the services above (see IWorkGregClient).
         services.AddScoped<IWorkGregClient, InProcessWorkGregClient>();
         return services;
     }
-
     /// <summary>
     /// Outgoing vacancy messages. The core only calls sendMessage, never getUpdates, so it may share the bot's token with
     /// the bot process. The client is registered with TryAdd: whoever registers it first wins (same token either way).
@@ -138,4 +138,5 @@ public static class ServiceCollectionExtensions
         SourceCatalog.Load(path);
         return services;
     }
+
 }

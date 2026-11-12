@@ -11,13 +11,24 @@ public static class DtoMapping
         new(s.Id, s.SearchProfileId, s.Type, s.Provider, s.Name, s.Url, s.Enabled,
             s.ConsecutiveFailures, s.LastError, s.LastSuccessUtc);
 
-    public static ProfileDto ToDto(this SearchProfile p, IEnumerable<Source> sources) =>
+    /// <param name="autofillReady">Whether the profile has first name, last name and email stored for autofill (see AutofillService.ReadyProfileIdsAsync).</param>
+    public static ProfileDto ToDto(this SearchProfile p, IEnumerable<Source> sources, bool autofillReady = false) =>
         new(p.Id, p.Name, p.Keyword, p.Enabled,
             p.Include.ToList(), p.Exclude.ToList(), p.Companies.ToList(), p.Locations.ToList(),
             p.MinSalary, p.RemoteOnly,
-            sources.Select(s => s.ToDto()).ToList());
+            sources.Select(s => s.ToDto()).ToList(),
+            autofillReady);
 
-    public static ProfileDto ToDto(this ProfileDetails d) => d.Profile.ToDto(d.Sources);
+    public static ProfileDto ToDto(this ProfileDetails d, bool autofillReady = false) =>
+        d.Profile.ToDto(d.Sources, autofillReady);
+
+    public static AutofillDocumentDto ToDto(this AutofillDocumentInfo d) => new(d.Kind, d.FileName, d.ContentType, d.SizeBytes);
+
+    public static AutofillSettingsDto ToDto(this AutofillSettings s) =>
+        new(s.ProfileId,
+            s.StandardFields.Where(f => f.Key is not null).Select(f => new AutofillValueDto(f.Key!.Value, f.Value)).ToList(),
+            s.CustomRules.Select(r => new AutofillRuleDto(r.Id, r.MatchBy, r.Pattern ?? "", r.IsRegex, r.Value, r.SortOrder)).ToList(),
+            s.Documents.Select(d => d.ToDto()).ToList());
 
     public static SettingsDto ToDto(this UserSettings s) => new(s.Paused, s.Delivery, s.DigestHourUtc);
 

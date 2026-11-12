@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -92,6 +93,53 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
     public Task<Result<SourceChangeDto, Error>> ToggleSourceAsync(long chatId, int profileId, string providerId, CancellationToken ct) =>
         SourceCall(HttpMethod.Post, chatId, profileId, providerId, "/toggle", ct);
 
+    // ---- autofill
+
+    public Task<Result<AutofillSettingsDto, Error>> GetAutofillAsync(long chatId, int profileId, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Get, Autofill(chatId, profileId), null, ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> SetAutofillValueAsync(
+        long chatId, int profileId, AutofillKey key, string? value, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Put, $"{Autofill(chatId, profileId)}/fields/{key}",
+            new SetAutofillValueRequest(value), ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> ClearAutofillValueAsync(
+        long chatId, int profileId, AutofillKey key, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Delete, $"{Autofill(chatId, profileId)}/fields/{key}", null, ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> AddAutofillRuleAsync(
+        long chatId, int profileId, AutofillRuleRequest rule, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Post, $"{Autofill(chatId, profileId)}/rules", rule, ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> UpdateAutofillRuleAsync(
+        long chatId, int profileId, int ruleId, AutofillRuleRequest rule, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Put, $"{Autofill(chatId, profileId)}/rules/{ruleId}", rule, ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> DeleteAutofillRuleAsync(
+        long chatId, int profileId, int ruleId, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Delete, $"{Autofill(chatId, profileId)}/rules/{ruleId}", null, ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> SetAutofillDocumentAsync(
+        long chatId, int profileId, AutofillDocumentKind kind, string fileName, byte[] content, CancellationToken ct)
+    {
+        // multipart/form-data with one field, "file". The core decides the content type from the file itself.
+        var form = new MultipartFormDataContent();
+        var file = new ByteArrayContent(content);
+        file.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        form.Add(file, "file", fileName);
+
+        return SendContentAsync<AutofillSettingsDto>(HttpMethod.Post, $"{Autofill(chatId, profileId)}/documents/{kind}", form, ct);
+    }
+
+    public Task<Result<AutofillSettingsDto, Error>> DeleteAutofillDocumentAsync(
+        long chatId, int profileId, AutofillDocumentKind kind, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Delete, $"{Autofill(chatId, profileId)}/documents/{kind}", null, ct);
+
+    public Task<Result<AutofillSettingsDto, Error>> CopyAutofillAsync(
+        long chatId, int fromProfileId, int toProfileId, CancellationToken ct) =>
+        SendAsync<AutofillSettingsDto>(HttpMethod.Post, $"{Autofill(chatId, toProfileId)}/copy",
+            new CopyAutofillRequest(fromProfileId), ct);
+
     // ---- user settings
     public async Task<OverviewDto> GetOverviewAsync(long chatId, CancellationToken ct) =>
         Unwrap(await SendAsync<OverviewDto>(HttpMethod.Get, $"{Chat(chatId)}/overview", null, ct));
@@ -125,6 +173,8 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
 
     private static string Chat(long chatId) => $"api/{chatId}";
 
+    private static string Autofill(long chatId, int profileId) => $"{Chat(chatId)}/profiles/{profileId}/autofill";
+
     /// <summary>PATCH /profiles/{id} takes exactly one field. A null value clears a filter (the core decides what null means for the others).</summary>
     private Task<Result<ProfileDto, Error>> PatchProfile(long chatId, int id, string field, object? value, CancellationToken ct) =>
         SendAsync<ProfileDto>(HttpMethod.Patch, $"{Chat(chatId)}/profiles/{id}",
@@ -142,11 +192,13 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
             $"{Chat(chatId)}/profiles/{profileId}/sources/by-provider/{Uri.EscapeDataString(provider)}{suffix}", null, ct);
     }
 
-    private async Task<Result<T, Error>> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct)
+    private Task<Result<T, Error>> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct) =>
+        SendContentAsync<T>(method, path, body is null ? null : JsonContent.Create(body, body.GetType(), options: Json), ct);
+
+    /// <summary>The request body is already built (JSON, or multipart for a file). The request disposes it.</summary>
+    private async Task<Result<T, Error>> SendContentAsync<T>(HttpMethod method, string path, HttpContent? content, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(method, path);
-        if (body is not null)
-            request.Content = JsonContent.Create(body, body.GetType(), options: Json);
+        using var request = new HttpRequestMessage(method, path) { Content = content };
 
         // GET goes through the client that retries; everything else through the one that never does (see AddWorkGregHttpClient).
         var http = method == HttpMethod.Get ? reads : writes;
@@ -199,4 +251,3 @@ internal sealed class HttpWorkGregClient(HttpClient reads, HttpClient writes, Me
             ? result.Value
             : throw new CoreApiException(HttpStatusCode.BadRequest, $"The core refused the request: {result.Error.Message}");
 }
-

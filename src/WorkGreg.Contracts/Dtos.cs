@@ -48,7 +48,9 @@ public sealed record ProfileDto(
     IReadOnlyList<string> Locations,
     int? MinSalary,
     bool RemoteOnly,
-    IReadOnlyList<SourceDto> Sources);
+    IReadOnlyList<SourceDto> Sources,
+    /// <summary>True when the profile has a first name, last name and email stored for autofill (see AutofillService.ReadyProfileIdsAsync).</summary>
+    bool AutofillReady = false);
 
 /// <summary>A source was attached to or removed from a profile.</summary>
 public sealed record SourceChangeDto(int ProfileId, string ProfileName, SourceDto Source, bool Added);
