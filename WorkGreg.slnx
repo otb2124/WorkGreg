@@ -9,5 +9,6 @@
     <Project Path="src/WorkGreg.Contracts/WorkGreg.Contracts.csproj" />
     <Project Path="src/WorkGreg.Core/WorkGreg.Core.csproj" />
     <Project Path="src/WorkGreg.Host/WorkGreg.Host.csproj" />
+    <Project Path="src/WorkGreg.Applier/WorkGreg.Applier.csproj" />
   </Folder>
 </Solution>

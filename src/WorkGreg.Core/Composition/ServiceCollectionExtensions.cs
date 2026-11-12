@@ -32,11 +32,13 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IValidateOptions<PollOptions>, PollOptionsValidator>();
         services.AddSingleton<IValidateOptions<RetentionOptions>, RetentionOptionsValidator>();
         services.AddSingleton<IValidateOptions<ApiOptions>, ApiOptionsValidator>();
+        services.AddSingleton<IValidateOptions<ApplierOptions>, ApplierOptionsValidator>();
 
         services.AddOptions<BotOptions>().BindConfiguration("Bot").ValidateOnStart();
         services.AddOptions<PollOptions>().BindConfiguration("Polling").ValidateOnStart();
         services.AddOptions<RetentionOptions>().BindConfiguration("Retention").ValidateOnStart();
         services.AddOptions<ApiOptions>().BindConfiguration("Api").ValidateOnStart();
+        services.AddOptions<ApplierOptions>().BindConfiguration("Applier").ValidateOnStart();
 
         return services;
     }
