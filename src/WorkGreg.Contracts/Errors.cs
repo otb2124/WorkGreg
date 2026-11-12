@@ -31,6 +31,18 @@ public static class ErrorCodes
 
     /// <summary>A prompt answer that had to be a positive whole number.</summary>
     public const string InputPositiveInteger = "input.positive_integer";
+
+    // ---- autofill
+    public const string AutofillValueInvalid = "autofill.value_invalid";
+    public const string AutofillPatternInvalid = "autofill.pattern_invalid";
+    public const string AutofillRegexInvalid = "autofill.regex_invalid";
+    public const string AutofillRuleLimitReached = "autofill.rule_limit_reached";
+    public const string AutofillRuleNotFound = "autofill.rule_not_found";
+    public const string AutofillDocumentTooLarge = "autofill.document_too_large";
+    public const string AutofillDocumentTypeInvalid = "autofill.document_type_invalid";
+    public const string AutofillDocumentNameInvalid = "autofill.document_name_invalid";
+    public const string AutofillCopySameProfile = "autofill.copy_same_profile";
+    public const string AutofillConflict = "autofill.conflict";
 }
 
 /// <summary>
@@ -93,6 +105,41 @@ public static class Errors
 
     public static Error HourlyCheckRunning { get; } =
         Error.Busy(ErrorCodes.CheckHourlyRunning, "The hourly check is running right now.");
+
+    // ---- autofill
+
+    public static Error AutofillValueInvalid(int max) =>
+        Error.Validation(ErrorCodes.AutofillValueInvalid, $"The value must be 1-{max} characters.", Error.Arg("max", max));
+
+    public static Error AutofillPatternInvalid(int max) =>
+        Error.Validation(
+            ErrorCodes.AutofillPatternInvalid,
+            $"The pattern must be 1-{max} characters and contain a letter or a digit.",
+            Error.Arg("max", max));
+
+    public static Error AutofillRegexInvalid { get; } =
+        Error.Validation(ErrorCodes.AutofillRegexInvalid, "That is not a valid regular expression.");
+
+    public static Error AutofillRuleLimitReached(int max) =>
+        Error.Validation(ErrorCodes.AutofillRuleLimitReached, $"Custom answer limit reached ({max}).", Error.Arg("max", max));
+
+    public static Error AutofillRuleNotFound { get; } =
+        Error.NotFound(ErrorCodes.AutofillRuleNotFound, "No such custom answer.");
+
+    public static Error AutofillDocumentTooLarge(int maxMb) =>
+        Error.Validation(ErrorCodes.AutofillDocumentTooLarge, $"The file is larger than {maxMb} MB.", Error.Arg("max_mb", maxMb));
+
+    public static Error AutofillDocumentTypeInvalid { get; } =
+        Error.Validation(ErrorCodes.AutofillDocumentTypeInvalid, "Only PDF and DOCX files are accepted.");
+
+    public static Error AutofillDocumentNameInvalid { get; } =
+        Error.Validation(ErrorCodes.AutofillDocumentNameInvalid, "The file name is empty or too long.");
+
+    public static Error AutofillCopySameProfile { get; } =
+        Error.Validation(ErrorCodes.AutofillCopySameProfile, "Pick a different profile to copy from.");
+
+    public static Error AutofillConflict { get; } =
+        Error.Conflict(ErrorCodes.AutofillConflict, "The settings changed at the same moment. Please try again.");
 
     // ---- front-end input
 
