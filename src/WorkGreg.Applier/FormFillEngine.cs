@@ -3,6 +3,19 @@ using WorkGreg.Domain;
 
 namespace WorkGreg.Applying;
 
+/// <summary>Hooks an ATS adapter can give the generic fill. Everything is optional; the default is the plain generic behaviour.</summary>
+public sealed record FormFillOptions
+{
+    /// <summary>Do not treat the invisible reCAPTCHA badge as a captcha (see <see cref="CaptchaDetector"/>).</summary>
+    public bool IgnoreInvisibleRecaptcha { get; init; }
+
+    /// <summary>Tried before the generic fill for every field. Returns true when it filled the field itself.</summary>
+    public Func<ScannedField, FillContext, Task<bool>>? FillOverride { get; init; }
+
+    /// <summary>Fields that are page machinery, not questions (never filled, never reported as unmatched).</summary>
+    public Func<ScannedField, bool>? IsNoise { get; init; }
+}
+
 /// <summary>
 /// The generic fill: scan the form, resolve a value for every field with <see cref="FieldMatcher"/>, enter it, and report.
 /// Used directly for unknown sites and as the base for ATS adapters. It never clicks a button and never submits.
@@ -18,10 +31,13 @@ public static class FormFillEngine
         "text", "email", "tel", "url", "search", "number", "textarea"
     };
 
-    public static async Task<FillReport> RunAsync(IPage page, FillContext ctx)
+    public static async Task<FillReport> RunAsync(IPage page, FillContext ctx, FormFillOptions? options = null)
     {
+        options ??= new FormFillOptions();
+        var isNoise = options.IsNoise ?? (_ => false);
+
         // A captcha means a person has to take over: look, report, touch nothing.
-        if (await CaptchaDetector.DetectAsync(page))
+        if (await CaptchaDetector.DetectAsync(page, options.IgnoreInvisibleRecaptcha))
         {
             ctx.Logger.LogInformation("Captcha detected; nothing was filled.");
             return new FillReport([], [], CaptchaDetected: true, Fingerprint: "", await ScreenshotAsync(page, ctx.Logger));
@@ -33,7 +49,7 @@ public static class FormFillEngine
 
         for (var pass = 0; pass < MaxPasses; pass++)
         {
-            var fields = await FieldScanner.ScanAsync(page, ctx.Ct);
+            var fields = (await FieldScanner.ScanAsync(page, ctx.Ct)).Where(f => !isNoise(f)).ToList();
             fingerprint ??= FormFingerprint.Compute(fields.Select(f => f.Descriptor.Label));
 
             var progress = false;
@@ -42,7 +58,7 @@ public static class FormFillEngine
                 ctx.Ct.ThrowIfCancellationRequested();
                 if (handled.Contains(field.Key)) continue;
 
-                if (await TryFillAsync(field, ctx))
+                if (await TryFillAsync(field, ctx, options))
                 {
                     handled.Add(field.Key);
                     filled.Add(DisplayLabel(field.Descriptor));
@@ -53,7 +69,7 @@ public static class FormFillEngine
         }
 
         // Look again: required fields that are still empty are what the user has to answer.
-        var finalFields = await FieldScanner.ScanAsync(page, ctx.Ct);
+        var finalFields = (await FieldScanner.ScanAsync(page, ctx.Ct)).Where(f => !isNoise(f)).ToList();
         var unmatched = UnmatchedRequired(finalFields, handled);
 
         ctx.Logger.LogInformation("Fill finished: {Filled} filled, {Unmatched} required fields unmatched.",
@@ -81,10 +97,12 @@ public static class FormFillEngine
         return result;
     }
 
-    private static async Task<bool> TryFillAsync(ScannedField field, FillContext ctx)
+    private static async Task<bool> TryFillAsync(ScannedField field, FillContext ctx, FormFillOptions options)
     {
         var d = field.Descriptor;
-        if (FieldMatcher.IsSkipped(d) || field.IsCombobox) return false;
+        if (FieldMatcher.IsSkipped(d)) return false;
+        if (options.FillOverride is { } custom && await custom(field, ctx)) return true;
+        if (field.IsCombobox) return false;
 
         try
         {

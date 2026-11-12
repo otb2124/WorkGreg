@@ -30,7 +30,7 @@ public sealed class PlaywrightFormFiller(
             var page = await context.NewPageAsync();
             await page.GotoAsync(request.Url, new PageGotoOptions
             {
-                WaitUntil = WaitUntilState.DomContentLoaded,
+                WaitUntil = WaitUntilState.DOMContentLoaded,
                 Timeout = NavigationTimeoutMs
             });
 

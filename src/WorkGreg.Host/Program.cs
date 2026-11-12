@@ -23,6 +23,7 @@ builder.Services
     .AddPersistence(builder.Configuration)
     .AddFetching()
     .AddApplicationServices()
+    .AddApplier()                              // Playwright + ATS adapters; no browser starts until first use
     .AddTelegramNotifier()                     // core: outgoing vacancy messages
     .AddPolling()
     .AddWorkGregApi(builder.Configuration);
